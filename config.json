@@ -1,0 +1,8 @@
+  {
+    "screen": { "width": 800, "height": 600, "title": "Breakout Game" },
+    "paddle": { "width": 100.0, "height": 10.0, "speed": 7.0, "color": [0, 0, 139, 255] },
+    "ball": { "radius": 10.0, "speed_base": 4.0, "color": [139, 0, 0, 255] },
+    "bricks": { "rows": 5, "cols": 10, "width": 75, "height": 20, "spacing": 5, "offset_x": 25, "offset_y": 50 },
+    "game": { "max_lives": 5 }
+  }
+  
