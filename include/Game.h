@@ -10,6 +10,8 @@
 
 using json = nlohmann::json;
 
+class GameObject;
+
 struct TrailPoint {
     Vector2 pos;
     float life;
@@ -129,6 +131,9 @@ private:
     Rectangle btnPlay_, btnSettings_, btnQuit_;
     std::string username_ = "Player";
 
+    std::vector<std::unique_ptr<GameObject>> gameObjects_;
+    GameObject* paddlePtr_ = nullptr;
+
     Paddle paddle_;
     std::vector<Ball> balls_;
     std::vector<Brick> bricks_;
@@ -169,6 +174,8 @@ public:
     void LoadConfig();
     void LoadLeaderboard();
     void SaveScore();
+
+    void InitGameObjects();
 
     static bool IsButtonClicked(const Rectangle& btn);
     static Color JsonToColor(const json& j);

@@ -36,49 +36,97 @@ class GameObject {
 public:
     virtual ~GameObject() = default;
     virtual void Update() = 0;
-    virtual void Draw() const = 0;
+    virtual void Draw() = 0;
 };
 
 class DemoBall : public GameObject {
 public:
-    DemoBall() = default;
+    DemoBall(Vector2 pos = {0, 0}, Vector2 vel = {0, 0}, float r = 0, Color c = BLACK)
+        : position(pos), velocity(vel), radius(r), color(c) {}
     ~DemoBall() override = default;
 
     void Update() override {
-        std::cout << "DemoBall updating..." << std::endl;
+        float dt = GetFrameTime();
+        trail.push_back({position, 0.3f});
+        if (trail.size() > 10) trail.pop_front();
+        for (auto& t : trail) t.life -= dt;
+
+        position.x += velocity.x * dt * 60.0f;
+        position.y += velocity.y * dt * 60.0f;
     }
 
-    void Draw() const override {
-        std::cout << "DemoBall drawing..." << std::endl;
+    void Draw() override {
+        for (size_t i = 0; i < trail.size(); ++i) {
+            float alpha = trail[i].life / 0.3f;
+            Color trailColor = Fade(color, alpha * 0.5f);
+            DrawCircleV(trail[i].pos, radius * (0.5f + i * 0.05f), trailColor);
+        }
+        DrawCircleV(position, radius, color);
     }
+
+    Vector2 position;
+    Vector2 velocity;
+    float radius;
+    Color color;
+
+private:
+    struct TrailPoint { Vector2 pos; float life; };
+    std::deque<TrailPoint> trail;
 };
 
 class DemoPaddle : public GameObject {
 public:
-    DemoPaddle() = default;
+    DemoPaddle(Vector2 pos = {0, 0}, float w = 100.0f, float h = 10.0f, Color c = BLUE)
+        : position(pos), width(w), height(h), color(c), originalWidth(w), extendTimer(0) {}
     ~DemoPaddle() override = default;
 
     void Update() override {
-        std::cout << "DemoPaddle updating..." << std::endl;
+        float dt = GetFrameTime();
+        if (extendTimer > 0) {
+            extendTimer -= dt;
+            if (extendTimer <= 0) width = originalWidth;
+        }
     }
 
-    void Draw() const override {
-        std::cout << "DemoPaddle drawing..." << std::endl;
+    void Draw() override {
+        DrawRectangleRec({position.x, position.y, width, height}, color);
+        if (width > originalWidth) {
+            DrawRectangleLinesEx({position.x - 2, position.y - 2, width + 4, height + 4}, 2, Fade(GREEN, 0.3f));
+        }
     }
+
+    void Extend(float extraWidth, float duration) {
+        width += extraWidth;
+        extendTimer = duration;
+    }
+
+    Vector2 position;
+    float width, height;
+    float originalWidth;
+    float extendTimer;
+    Color color;
 };
 
 class DemoBrick : public GameObject {
 public:
-    DemoBrick() = default;
+    DemoBrick(Vector2 pos = {0, 0}, float w = 0, float h = 0, Color c = GRAY)
+        : rect({pos.x, pos.y, w, h}), active(true), color(c) {}
     ~DemoBrick() override = default;
 
     void Update() override {
-        std::cout << "DemoBrick updating..." << std::endl;
+        // 砖块无主动逻辑示例，留空
     }
 
-    void Draw() const override {
-        std::cout << "DemoBrick drawing..." << std::endl;
+    void Draw() override {
+        if (active) {
+            DrawRectangleRec(rect, color);
+            DrawRectangleLinesEx(rect, 1, Fade(BLACK, 0.3f));
+        }
     }
+
+    Rectangle rect;
+    bool active;
+    Color color;
 };
 
 // ----- Ball -----
@@ -230,6 +278,21 @@ static std::unique_ptr<PowerUpEffect> CreatePowerUpEffect(PowerUpType type, cons
             return std::make_unique<SlowBallEffect>(speedFactor, fixedDuration);
         default:
             return nullptr;
+    }
+}
+
+void Game::InitGameObjects() {
+    gameObjects_.clear();
+    paddlePtr_ = nullptr;
+
+    auto paddle = std::make_unique<DemoPaddle>(Vector2{400.0f, 550.0f}, 100.0f, 10.0f, BLUE);
+    paddlePtr_ = paddle.get();
+    gameObjects_.push_back(std::move(paddle));
+
+    gameObjects_.push_back(std::make_unique<DemoBall>(Vector2{400.0f, 300.0f}, Vector2{4.0f, -4.0f}, 10.0f, RED));
+
+    for (int i = 0; i < 10; ++i) {
+        gameObjects_.push_back(std::make_unique<DemoBrick>(Vector2{50.0f + i * 80.0f, 100.0f}, 75.0f, 20.0f, GREEN));
     }
 }
 
