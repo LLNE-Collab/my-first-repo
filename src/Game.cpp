@@ -4,6 +4,82 @@
 #include <algorithm>
 #include <cstdlib>
 #include <ctime>
+#include <memory>
+#include <vector>
+
+enum class BrickType {
+    Normal = 1,
+    Gold   = 2,
+    Bomb   = 3
+};
+
+class ScoreCalculator {
+public:
+    [[nodiscard]] int CalculateBaseScore(BrickType brickType) const noexcept {
+        switch (brickType) {
+            case BrickType::Normal: return 10;
+            case BrickType::Gold:   return 20;
+            case BrickType::Bomb:   return -5;
+            default:                return 0;
+        }
+    }
+
+    [[nodiscard]] int CalculateScore(BrickType brickType, int combo = 0) const noexcept {
+        return CalculateBaseScore(brickType) + combo * comboBonus_;
+    }
+
+private:
+    static constexpr int comboBonus_ = 2;
+};
+
+class GameObject {
+public:
+    virtual ~GameObject() = default;
+    virtual void Update() = 0;
+    virtual void Draw() const = 0;
+};
+
+class DemoBall : public GameObject {
+public:
+    DemoBall() = default;
+    ~DemoBall() override = default;
+
+    void Update() override {
+        std::cout << "DemoBall updating..." << std::endl;
+    }
+
+    void Draw() const override {
+        std::cout << "DemoBall drawing..." << std::endl;
+    }
+};
+
+class DemoPaddle : public GameObject {
+public:
+    DemoPaddle() = default;
+    ~DemoPaddle() override = default;
+
+    void Update() override {
+        std::cout << "DemoPaddle updating..." << std::endl;
+    }
+
+    void Draw() const override {
+        std::cout << "DemoPaddle drawing..." << std::endl;
+    }
+};
+
+class DemoBrick : public GameObject {
+public:
+    DemoBrick() = default;
+    ~DemoBrick() override = default;
+
+    void Update() override {
+        std::cout << "DemoBrick updating..." << std::endl;
+    }
+
+    void Draw() const override {
+        std::cout << "DemoBrick drawing..." << std::endl;
+    }
+};
 
 // ----- Ball -----
 Ball::Ball(Vector2 pos, Vector2 vel, float r, Color c)
