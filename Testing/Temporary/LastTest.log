@@ -1,0 +1,31 @@
+Start testing: Apr 15 22:06 CST
+----------------------------------------------------------
+1/1 Testing: LogicTests
+1/1 Test: LogicTests
+Command: "/home/llne/breakout_project/tests/test_logic"
+Directory: /home/llne/breakout_project/tests
+"LogicTests" start time: Apr 15 22:06 CST
+Output:
+----------------------------------------------------------
+Running main() from /home/llne/breakout_project/_deps/googletest-src/googletest/src/gtest_main.cc
+[==========] Running 2 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 2 tests from CollisionTest
+[ RUN      ] CollisionTest.BallInsideRect
+[       OK ] CollisionTest.BallInsideRect (0 ms)
+[ RUN      ] CollisionTest.BallOutsideRect
+[       OK ] CollisionTest.BallOutsideRect (0 ms)
+[----------] 2 tests from CollisionTest (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 2 tests from 1 test suite ran. (0 ms total)
+[  PASSED  ] 2 tests.
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"LogicTests" end time: Apr 15 22:06 CST
+"LogicTests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Apr 15 22:06 CST

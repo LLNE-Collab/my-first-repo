@@ -1,87 +1,177 @@
-#pragma once
+#ifndef GAME_H
+#define GAME_H
 
 #include "raylib.h"
+#include <deque>
 #include <vector>
+#include <memory>
 #include <string>
 #include <nlohmann/json.hpp>
 
-// 使用 nlohmann/json 库处理配置
 using json = nlohmann::json;
 
-// 游戏状态枚举，替代散乱的 bool 标志
-enum class GameState {
-    MENU,
-    NAME_INPUT,
-    LEVEL_SELECT,
-    SETTINGS,
-    PLAYING,
-    PAUSED,
-    GAME_OVER,
-    LEADERBOARD,
-    WIN
+struct TrailPoint {
+    Vector2 pos;
+    float life;
 };
 
-// 砖块结构体
-struct Brick {
+class Ball {
+public:
+    Vector2 position;
+    Vector2 velocity;
+    float radius;
+    Color color;
+    std::deque<TrailPoint> trail;
+
+    Ball(Vector2 pos, Vector2 vel, float r, Color c);
+    ~Ball();
+    void Update(float dt);
+    void Draw() const;
+};
+
+class Paddle {
+public:
+    Vector2 position;
+    float width, height;
+    Color color;
+    float originalWidth;
+    float extendTimer;
+
+    Paddle(Vector2 pos, float w, float h, Color c);
+    ~Paddle();
+    void Extend(float extraWidth, float duration);
+    void Update(float dt);
+    void Draw() const;
+};
+
+class Brick {
+public:
     Rectangle rect;
     bool active;
     Color color;
+    Brick(Vector2 pos, float w, float h, Color c);
+    ~Brick();
+    void Draw() const;
 };
 
-// 游戏主类
-class Game {
+enum class PowerUpType { PADDLE_EXTEND = 0, MULTI_BALL = 1, SLOW_BALL = 2 };
+
+class PowerUp {
 public:
-    Game();
-    ~Game();
-    
-    void Run(); // 主循环
+    Vector2 position;
+    PowerUpType type;
+    bool active;
+    float duration;
 
-private:
-    // 核心流程
-    void Update();
+    PowerUp(Vector2 pos, PowerUpType t);
+    ~PowerUp();
+    void Update(float dt, float screenHeight);
     void Draw();
-    void ResetGame();
-    
-    // 状态更新函数
-    void UpdateMenu();
-    void UpdateNameInput();
-    void UpdateLevelSelect();
-    void UpdateSettings();
-    void UpdatePlaying();
-    void UpdatePaused();
-    void UpdateGameOver();
-    void UpdateLeaderboard();
-    
-    // 绘制辅助
-    void DrawUI();
-    void DrawHeart(Vector2 position, float size, Color color); // 绘制爱心
-    
-    // 数据持久化
-    void LoadConfig();
-    void SaveScore();
-    void LoadLeaderboard();
-    
-    // 辅助工具
-    Color JsonToColor(const json& j); // JSON 转颜色
-    bool IsButtonClicked(Rectangle rec); // 按钮点击检测
+};
 
-    // 数据成员
-    GameState state_;
+class Particle {
+public:
+    Vector2 pos, vel;
+    Color color;
+    float life;
+    Particle(Vector2 p, Vector2 v, Color c, float l);
+    ~Particle();
+    void Update(float dt);
+    void Draw();
+};
+
+class Game;
+
+// 道具效果基类和派生类
+class PowerUpEffect {
+public:
+    virtual ~PowerUpEffect() {}
+    virtual void Apply(Game& game) = 0;
+};
+
+class ExtendPaddleEffect : public PowerUpEffect {
+    float extraWidth;
+    float duration;
+public:
+    ExtendPaddleEffect(float w, float d);
+    ~ExtendPaddleEffect();
+    void Apply(Game& game) override;
+};
+
+class MultiBallEffect : public PowerUpEffect {
+    int extraBalls;
+public:
+    MultiBallEffect(int b);
+    ~MultiBallEffect();
+    void Apply(Game& game) override;
+};
+
+class SlowBallEffect : public PowerUpEffect {
+    float speedFactor;
+    float duration;
+public:
+    SlowBallEffect(float f, float d);
+    ~SlowBallEffect();
+    void Apply(Game& game) override;
+};
+
+enum class GameState { MENU, PLAYING, PAUSED, GAME_OVER, LEADERBOARD };
+
+class Game {
+private:
     int screenWidth_, screenHeight_;
-    
-    // 游戏对象
-    struct { Vector2 pos; Vector2 vel; float radius; Color color; } ball_;
-    struct { Vector2 pos; float width, height; Color color; } paddle_;
-    std::vector<Brick> bricks_;
-    
-    // 游戏数据
-    std::string username_;
+    GameState state_;
     int score_;
     int lives_;
     int level_;
+
+    // 窗口控件
+    Rectangle btnPlay_, btnSettings_, btnQuit_;
+    std::string username_ = "Player";
+
+    Paddle paddle_;
+    std::vector<Ball> balls_;
+    std::vector<Brick> bricks_;
+    std::vector<PowerUp> powerUps_;
+    std::vector<Particle> particles_;
+
+    std::vector<std::pair<std::string,int>> leaderboardData_;
+
     json config_;
-    std::vector<std::pair<std::string, int>> leaderboardData_;
-    
-    // UI 缓存
-    Rectangle btnPlay_, btnSettings_, btnQuit_, btnLeaderboard_, btnLevelSelect_;
+
+    // 速度、延时相关
+    float paddleExtendTimer_;
+    float slowBallTimer_;
+    float ballRespawnTimer_;
+
+    std::vector<Vector2> originalVelocities_;
+
+public:
+    Game();
+    ~Game();
+
+    void Run();
+    void Update();
+    void UpdateMenu();
+    void UpdatePlaying();
+    void UpdatePaused();
+    void ResetGame();
+
+    void Draw();
+    void DrawUI();
+
+    void ApplyPaddleExtend(float extraWidth, float duration);
+    void ApplySlowBall(float speedFactor, float duration);
+
+    void AddBall(const Ball& ball);
+    Ball GetBall() const;
+
+    void LoadConfig();
+    void LoadLeaderboard();
+    void SaveScore();
+
+    static bool IsButtonClicked(const Rectangle& btn);
+    static Color JsonToColor(const json& j);
 };
+
+#endif // GAME_H
