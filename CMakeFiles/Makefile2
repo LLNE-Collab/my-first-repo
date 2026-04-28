@@ -192,8 +192,8 @@ CMakeFiles/breakout.dir/clean:
 # Target rules for target tests/CMakeFiles/test_logic.dir
 
 # All Build rule for target.
-tests/CMakeFiles/test_logic.dir/all: _deps/googletest-build/googletest/CMakeFiles/gtest_main.dir/all
 tests/CMakeFiles/test_logic.dir/all: _deps/googletest-build/googletest/CMakeFiles/gtest.dir/all
+tests/CMakeFiles/test_logic.dir/all: _deps/googletest-build/googletest/CMakeFiles/gtest_main.dir/all
 	$(MAKE) $(MAKESILENT) -f tests/CMakeFiles/test_logic.dir/build.make tests/CMakeFiles/test_logic.dir/depend
 	$(MAKE) $(MAKESILENT) -f tests/CMakeFiles/test_logic.dir/build.make tests/CMakeFiles/test_logic.dir/build
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --progress-dir=/home/llne/breakout_project/CMakeFiles --progress-num=12,13 "Built target test_logic"

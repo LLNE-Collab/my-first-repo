@@ -95,6 +95,51 @@ rebuild_cache:
 rebuild_cache/fast: rebuild_cache
 .PHONY : rebuild_cache/fast
 
+# Special rule for the target list_install_components
+list_install_components:
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --cyan "Available install components are: \"Unspecified\""
+.PHONY : list_install_components
+
+# Special rule for the target list_install_components
+list_install_components/fast: list_install_components
+.PHONY : list_install_components/fast
+
+# Special rule for the target install
+install: preinstall
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --cyan "Install the project..."
+	/usr/bin/cmake -P cmake_install.cmake
+.PHONY : install
+
+# Special rule for the target install
+install/fast: preinstall/fast
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --cyan "Install the project..."
+	/usr/bin/cmake -P cmake_install.cmake
+.PHONY : install/fast
+
+# Special rule for the target install/local
+install/local: preinstall
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --cyan "Installing only the local directory..."
+	/usr/bin/cmake -DCMAKE_INSTALL_LOCAL_ONLY=1 -P cmake_install.cmake
+.PHONY : install/local
+
+# Special rule for the target install/local
+install/local/fast: preinstall/fast
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --cyan "Installing only the local directory..."
+	/usr/bin/cmake -DCMAKE_INSTALL_LOCAL_ONLY=1 -P cmake_install.cmake
+.PHONY : install/local/fast
+
+# Special rule for the target install/strip
+install/strip: preinstall
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --cyan "Installing the project stripped..."
+	/usr/bin/cmake -DCMAKE_INSTALL_DO_STRIP=1 -P cmake_install.cmake
+.PHONY : install/strip
+
+# Special rule for the target install/strip
+install/strip/fast: preinstall/fast
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --cyan "Installing the project stripped..."
+	/usr/bin/cmake -DCMAKE_INSTALL_DO_STRIP=1 -P cmake_install.cmake
+.PHONY : install/strip/fast
+
 # The main all target
 all: cmake_check_build_system
 	cd /home/llne/breakout_project/build && $(CMAKE_COMMAND) -E cmake_progress_start /home/llne/breakout_project/build/CMakeFiles /home/llne/breakout_project/build/tests//CMakeFiles/progress.marks
@@ -126,6 +171,44 @@ depend:
 	cd /home/llne/breakout_project/build && $(CMAKE_COMMAND) -S$(CMAKE_SOURCE_DIR) -B$(CMAKE_BINARY_DIR) --check-build-system CMakeFiles/Makefile.cmake 1
 .PHONY : depend
 
+# Convenience name for target.
+tests/CMakeFiles/test_logic.dir/rule:
+	cd /home/llne/breakout_project/build && $(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 tests/CMakeFiles/test_logic.dir/rule
+.PHONY : tests/CMakeFiles/test_logic.dir/rule
+
+# Convenience name for target.
+test_logic: tests/CMakeFiles/test_logic.dir/rule
+.PHONY : test_logic
+
+# fast build rule for target.
+test_logic/fast:
+	cd /home/llne/breakout_project/build && $(MAKE) $(MAKESILENT) -f tests/CMakeFiles/test_logic.dir/build.make tests/CMakeFiles/test_logic.dir/build
+.PHONY : test_logic/fast
+
+test_logic.o: test_logic.cpp.o
+.PHONY : test_logic.o
+
+# target to build an object file
+test_logic.cpp.o:
+	cd /home/llne/breakout_project/build && $(MAKE) $(MAKESILENT) -f tests/CMakeFiles/test_logic.dir/build.make tests/CMakeFiles/test_logic.dir/test_logic.cpp.o
+.PHONY : test_logic.cpp.o
+
+test_logic.i: test_logic.cpp.i
+.PHONY : test_logic.i
+
+# target to preprocess a source file
+test_logic.cpp.i:
+	cd /home/llne/breakout_project/build && $(MAKE) $(MAKESILENT) -f tests/CMakeFiles/test_logic.dir/build.make tests/CMakeFiles/test_logic.dir/test_logic.cpp.i
+.PHONY : test_logic.cpp.i
+
+test_logic.s: test_logic.cpp.s
+.PHONY : test_logic.s
+
+# target to generate assembly for a file
+test_logic.cpp.s:
+	cd /home/llne/breakout_project/build && $(MAKE) $(MAKESILENT) -f tests/CMakeFiles/test_logic.dir/build.make tests/CMakeFiles/test_logic.dir/test_logic.cpp.s
+.PHONY : test_logic.cpp.s
+
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -133,8 +216,16 @@ help:
 	@echo "... clean"
 	@echo "... depend"
 	@echo "... edit_cache"
+	@echo "... install"
+	@echo "... install/local"
+	@echo "... install/strip"
+	@echo "... list_install_components"
 	@echo "... rebuild_cache"
 	@echo "... test"
+	@echo "... test_logic"
+	@echo "... test_logic.o"
+	@echo "... test_logic.i"
+	@echo "... test_logic.s"
 .PHONY : help
 
 
