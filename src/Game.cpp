@@ -33,27 +33,37 @@ int ScoreCalculator::CalculateScore(BrickType brickType, int combo) const noexce
 // ============================================================
 
 Ball::Ball(Vector2 pos, Vector2 vel, float r, Color c)
-    : position(pos), velocity(vel), radius(r), color(c), trail_() {}
+    : position(pos), velocity(vel), radius(r), color(c) {}
 
 Ball::~Ball() = default;
 
 void Ball::Update(float dt) {
-    trail_.push_back({position, 0.3f});
-    if (trail_.size() > 10) trail_.erase(trail_.begin());
-    for (auto& t : trail_) t.life -= dt;
+    if (trailCount_ < MAX_TRAIL) {
+        const int w = (trailHead_ + trailCount_) % MAX_TRAIL;
+        trail_[w] = {position, 0.3f};
+        ++trailCount_;
+    } else {
+        trail_[trailHead_] = {position, 0.3f};
+        trailHead_ = (trailHead_ + 1) % MAX_TRAIL;
+    }
+    for (int i = 0; i < trailCount_; ++i) {
+        const int idx = (trailHead_ + i) % MAX_TRAIL;
+        trail_[idx].life -= dt;
+    }
 
     position.x += velocity.x * dt * 60.0f;
     position.y += velocity.y * dt * 60.0f;
 }
 
 void Ball::Draw() const {
-    for (size_t i = 0; i < trail_.size(); ++i) {
-        float alpha = trail_[i].life / 0.3f;
+    for (int i = 0; i < trailCount_; ++i) {
+        const int idx = (trailHead_ + i) % MAX_TRAIL;
+        float alpha = trail_[idx].life / 0.3f;
         if (alpha < 0.0f) alpha = 0.0f;
         if (alpha > 1.0f) alpha = 1.0f;
 
         Color trailColor = Fade(color, alpha * 0.5f);
-        DrawCircleV(trail_[i].pos, radius * (0.5f + i * 0.05f), trailColor);
+        DrawCircleV(trail_[idx].pos, radius * (0.5f + static_cast<float>(i) * 0.05f), trailColor);
     }
     DrawCircleV(position, radius, color);
 }
@@ -338,7 +348,75 @@ void Game::ClampPaddle(Paddle& paddle) {
         paddle.position.y = screenHeight_ - paddle.height;
 }
 
+void Game::RecordUpdatePlayingLatency(double startSeconds) {
+    lastUpdatePlayingMs_ = static_cast<float>((GetTime() - startSeconds) * 1000.0);
+
+    static int frameCounter = 0;
+    if (frameCounter++ % 60 == 0) {
+        TraceLog(LOG_INFO,
+                 "Total: %.2fms | Physics: %.2fms | Particles: %.2fms (Active: %d)",
+                 static_cast<double>(lastUpdatePlayingMs_),
+                 static_cast<double>(lastBrickCollisionMs_),
+                 static_cast<double>(lastParticleUpdateMs_),
+                 activeParticleCount_);
+    }
+}
+
+void Game::ClearParticlePool() {
+    for (int i = 0; i < MAX_PARTICLES; ++i) {
+        particleActive_[i] = false;
+    }
+    activeParticleCount_ = 0;
+}
+
+void Game::EmitParticlesAtBrick(const Rectangle& brickRect, Color color, int count) {
+    int rw = static_cast<int>(brickRect.width);
+    int rh = static_cast<int>(brickRect.height);
+    if (rw < 1) {
+        rw = 1;
+    }
+    if (rh < 1) {
+        rh = 1;
+    }
+    int spawned = 0;
+    for (int i = 0; i < MAX_PARTICLES && spawned < count; ++i) {
+        if (particleActive_[i]) {
+            continue;
+        }
+        const Vector2 pos = {
+            brickRect.x + static_cast<float>(rand() % rw),
+            brickRect.y + static_cast<float>(rand() % rh)
+        };
+        const Vector2 vel = {
+            static_cast<float>((rand() % 200 - 100) / 10.0f),
+            static_cast<float>((rand() % 200 - 100) / 10.0f)
+        };
+        particlePool_[i] = Particle(pos, vel, color, 0.5f);
+        particleActive_[i] = true;
+        ++activeParticleCount_;
+        ++spawned;
+    }
+}
+
+void Game::UpdateParticles(float dt) {
+    for (int i = 0; i < MAX_PARTICLES; ++i) {
+        if (!particleActive_[i]) {
+            continue;
+        }
+        particlePool_[i].Update(dt);
+        if (particlePool_[i].life <= 0.0f) {
+            particleActive_[i] = false;
+            --activeParticleCount_;
+        }
+    }
+}
+
+// UpdatePlaying：startFrame 为整帧墙钟；startCollision / startParticle 为分段计时（见下）。
+// 粒子更新放在球/砖碰撞之前，以便球重生等待期内尾迹粒子仍每帧衰减（逻辑需要）。
 void Game::UpdatePlaying() {
+    const double startFrame = GetTime();
+    lastParticleUpdateMs_ = 0.0f;
+    lastBrickCollisionMs_ = 0.0f;
     float dt = GetFrameTime();
 
     // L 键：触发异步模拟加载
@@ -387,10 +465,12 @@ void Game::UpdatePlaying() {
                 loadingMessage_ = "Load Failed!";
             }
         }
+        RecordUpdatePlayingLatency(startFrame);
         return;
     }
 
     if (loadFailed_) {
+        RecordUpdatePlayingLatency(startFrame);
         return;
     }
 
@@ -417,15 +497,10 @@ void Game::UpdatePlaying() {
         powerUps_.end()
     );
 
-    // 更新粒子
-    for (auto& part : particles_) {
-        part.Update(dt);
-    }
-    particles_.erase(
-        std::remove_if(particles_.begin(), particles_.end(),
-                       [](const Particle& part) { return part.life <= 0.0f; }),
-        particles_.end()
-    );
+    // 粒子更新（分段计时；对象池无 erase / 堆分配；须在球重生等待期之前执行）
+    const double startParticle = GetTime();
+    UpdateParticles(dt);
+    lastParticleUpdateMs_ = static_cast<float>((GetTime() - startParticle) * 1000.0);
 
     // 双挡板控制
     float paddleSpeed = 500.0f * dt;
@@ -458,6 +533,7 @@ void Game::UpdatePlaying() {
             );
         }
         if (IsKeyPressed(KEY_ESCAPE)) state_ = GameState::PAUSED;
+        RecordUpdatePlayingLatency(startFrame);
         return;
     }
 
@@ -495,9 +571,24 @@ void Game::UpdatePlaying() {
         ball_.velocity.x = 8.0f * (hitPos - 0.5f);
     }
 
-    // 球与砖块碰撞
-    for (auto& brick : bricks_) {
-        if (brick.active && CheckCollisionCircleRec(ball_.position, ball_.radius, brick.rect)) {
+    // 球–砖碰撞（分段计时；对应控制台「Physics」；AABB 粗筛 + CheckCollisionCircleRec）
+    const double startCollision = GetTime();
+    {
+        const float ballR = ball_.radius;
+        const float bx = ball_.position.x;
+        const float by = ball_.position.y;
+        for (auto& brick : bricks_) {
+            if (!brick.active) {
+                continue;
+            }
+            const Rectangle& br = brick.rect;
+            if (bx + ballR < br.x || bx - ballR > br.x + br.width || by + ballR < br.y ||
+                by - ballR > br.y + br.height) {
+                continue;
+            }
+            if (!CheckCollisionCircleRec(ball_.position, ballR, br)) {
+                continue;
+            }
             brick.active = false;
             ball_.velocity.y *= -1.0f;
             score_ += 1;
@@ -506,21 +597,7 @@ void Game::UpdatePlaying() {
                 PlaySound(hitSound_);
             }
 
-            // 粒子效果
-            for (int j = 0; j < 20; ++j) {
-                particles_.push_back(Particle(
-                    Vector2{
-                        brick.rect.x + (float)(rand() % (int)brick.rect.width),
-                        brick.rect.y + (float)(rand() % (int)brick.rect.height)
-                    },
-                    Vector2{
-                        (float)((rand() % 200 - 100) / 10.0f),
-                        (float)((rand() % 200 - 100) / 10.0f)
-                    },
-                    brick.color,
-                    0.5f
-                ));
-            }
+            EmitParticlesAtBrick(brick.rect, brick.color, 20);
 
             // 道具掉落
             if ((rand() % 100) < 30) {
@@ -533,6 +610,7 @@ void Game::UpdatePlaying() {
             break;
         }
     }
+    lastBrickCollisionMs_ = static_cast<float>((GetTime() - startCollision) * 1000.0);
 
     // 道具接住
     for (auto& powerUp : powerUps_) {
@@ -585,6 +663,8 @@ void Game::UpdatePlaying() {
     }
 
     if (IsKeyPressed(KEY_ESCAPE)) state_ = GameState::PAUSED;
+
+    RecordUpdatePlayingLatency(startFrame);
 }
 
 // ============================================================
@@ -625,7 +705,7 @@ void Game::ResetGame() {
     bricks_.clear();
 
     powerUps_.clear();
-    particles_.clear();
+    ClearParticlePool();
     slowBallTimer_ = 0.0f;
     ballRespawnTimer_ = 0.0f;
     originalVelocities_.clear();
@@ -729,18 +809,45 @@ void Game::SaveScore() {
 // ============================================================
 
 void Game::DrawUI() {
-    DrawText(TextFormat("Score: %d", score_), 10, 10, 20, BLACK);
-    DrawText(TextFormat("Lives: %d", lives_), 10, 40, 20, BLACK);
-    DrawText(TextFormat("Level: %d/%d", currentLevel_, maxLevel_), 10, 70, 20, BLACK);
+    DrawFPS(10, 10);
+    DrawText(TextFormat("Update: %.2f ms", lastUpdatePlayingMs_), 10, 35, 18, YELLOW);
+    DrawText(TextFormat("Particles: %d / %d", activeParticleCount_, MAX_PARTICLES), 10, 58, 18, GREEN);
+    DrawText(TextFormat("Part Δt: %.3f ms", lastParticleUpdateMs_), 10, 81, 16, DARKGRAY);
+    DrawText(TextFormat("Physics: %.3f ms", lastBrickCollisionMs_), 10, 100, 16, DARKGRAY);
+
+    // 简易性能条：绿 = Physics（砖碰撞），蓝 = Particles；满条 = 4 ms
+    {
+        const int barX = 10;
+        const int barY0 = 118;
+        const int barMaxW = 180;
+        const int barH = 10;
+        const float capMs = 4.0f;
+        const float physT = std::min(1.0f, lastBrickCollisionMs_ / capMs);
+        const float partT = std::min(1.0f, lastParticleUpdateMs_ / capMs);
+        const int physW = static_cast<int>(physT * static_cast<float>(barMaxW));
+        const int partW = static_cast<int>(partT * static_cast<float>(barMaxW));
+
+        DrawText("Physics", barX + barMaxW + 8, barY0 - 1, 14, DARKGREEN);
+        DrawRectangle(barX, barY0, barMaxW, barH, Fade(LIGHTGRAY, 0.45f));
+        DrawRectangle(barX, barY0, physW, barH, Fade(GREEN, 0.9f));
+
+        DrawText("Particles", barX + barMaxW + 8, barY0 + barH + 5, 14, DARKBLUE);
+        DrawRectangle(barX, barY0 + barH + 4, barMaxW, barH, Fade(LIGHTGRAY, 0.45f));
+        DrawRectangle(barX, barY0 + barH + 4, partW, barH, Fade(BLUE, 0.9f));
+    }
+
+    DrawText(TextFormat("Score: %d", score_), 10, 158, 20, BLACK);
+    DrawText(TextFormat("Lives: %d", lives_), 10, 188, 20, BLACK);
+    DrawText(TextFormat("Level: %d/%d", currentLevel_, maxLevel_), 10, 218, 20, BLACK);
 
     if (paddle1_.extendTimer > 0.0f) {
-        DrawText(TextFormat("P1 Extend: %.1f", paddle1_.extendTimer), 10, 100, 20, BLUE);
+        DrawText(TextFormat("P1 Extend: %.1f", paddle1_.extendTimer), 10, 248, 20, BLUE);
     }
     if (paddle2_.extendTimer > 0.0f) {
-        DrawText(TextFormat("P2 Extend: %.1f", paddle2_.extendTimer), 10, 130, 20, GREEN);
+        DrawText(TextFormat("P2 Extend: %.1f", paddle2_.extendTimer), 10, 278, 20, GREEN);
     }
     if (slowBallTimer_ > 0.0f) {
-        DrawText(TextFormat("Slow Ball: %.1f", slowBallTimer_), 10, 160, 20, YELLOW);
+        DrawText(TextFormat("Slow Ball: %.1f", slowBallTimer_), 10, 308, 20, YELLOW);
     }
 }
 
@@ -825,7 +932,11 @@ void Game::Draw() {
                     }
 
                     for (auto& p : powerUps_) p.Draw();
-                    for (auto& part : particles_) part.Draw();
+                    for (int i = 0; i < MAX_PARTICLES; ++i) {
+                        if (particleActive_[i]) {
+                            particlePool_[i].Draw();
+                        }
+                    }
                     DrawUI();
 
                     if (loadCompleteTimer_ > 0.0f) {
@@ -870,7 +981,11 @@ void Game::Draw() {
                 }
             }
             for (auto& p : powerUps_) p.Draw();
-            for (auto& part : particles_) part.Draw();
+            for (int i = 0; i < MAX_PARTICLES; ++i) {
+                if (particleActive_[i]) {
+                    particlePool_[i].Draw();
+                }
+            }
             DrawUI();
             DrawRectangle(0, 0, screenWidth_, screenHeight_, {0, 0, 0, 150});
             DrawRectangle(screenWidth_ / 2 - 100, screenHeight_ / 2 - 50, 200, 100, LIGHTGRAY);

@@ -80,12 +80,16 @@ public:
     Color color;
 
 private:
+    static constexpr int MAX_TRAIL = 10;
+
     struct TrailPoint {
         Vector2 pos;
         float life;
     };
 
-    std::vector<TrailPoint> trail_;
+    TrailPoint trail_[MAX_TRAIL]{};
+    int trailHead_{0};
+    int trailCount_{0};
 };
 
 // =====================
@@ -246,7 +250,13 @@ private:
     bool IsButtonClicked(const Rectangle& btn);
     void ClampPaddle(Paddle& paddle);
 
-private:
+    void RecordUpdatePlayingLatency(double startSeconds);
+    void ClearParticlePool();
+    void EmitParticlesAtBrick(const Rectangle& brickRect, Color color, int count);
+    void UpdateParticles(float dt);
+
+    static constexpr int MAX_PARTICLES = 1000;
+
     int screenWidth_;
     int screenHeight_;
     GameState state_;
@@ -263,7 +273,8 @@ private:
 
     // 辅助系统
     std::vector<PowerUp> powerUps_;
-    std::vector<Particle> particles_;
+    Particle particlePool_[MAX_PARTICLES];
+    bool particleActive_[MAX_PARTICLES]{};
     std::vector<std::pair<std::string, int>> leaderboardData_;
     std::vector<Vector2> originalVelocities_;
 
@@ -293,4 +304,10 @@ private:
     Rectangle btnPlay_;
     Rectangle btnSettings_;
     Rectangle btnQuit_;
+
+    // 性能：上一帧 UpdatePlaying 总耗时与子段耗时（毫秒），供 UI / TraceLog
+    float lastUpdatePlayingMs_{0.0f};
+    float lastParticleUpdateMs_{0.0f};
+    float lastBrickCollisionMs_{0.0f};
+    int activeParticleCount_{0};
 };
