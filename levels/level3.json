@@ -1,0 +1,20 @@
+{
+    "background": "assets/bg_level3.png",
+    "brick_texture": "assets/brick_level3.png",
+    "hit_sound": "assets/hit3.wav",
+    "brick_width": 60,
+    "brick_height": 16,
+    "spacing": 3,
+    "offset_x": 40,
+    "offset_y": 80,
+    "pattern": [
+        "R...........R",
+        "RG.........GR",
+        "RGB.......BGR",
+        "RGYB.....BYGR",
+        "RGBY....YGBR",
+        "RGBY...YGBR",
+        "RGBY..YGBR",
+        "RGBY.YGBR"
+    ]
+}

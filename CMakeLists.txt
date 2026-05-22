@@ -24,6 +24,22 @@ add_executable(breakout ${SOURCES})
 target_include_directories(breakout PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(breakout PRIVATE raylib nlohmann_json::nlohmann_json)
 
+# 运行目录需要 config / levels（从 build 启动时自动复制）
+add_custom_command(TARGET breakout POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_SOURCE_DIR}/levels ${CMAKE_BINARY_DIR}/levels
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_SOURCE_DIR}/config.json ${CMAKE_BINARY_DIR}/config.json
+    COMMENT "Copy game data files to build directory"
+)
+if (EXISTS ${CMAKE_SOURCE_DIR}/assets)
+    add_custom_command(TARGET breakout POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_SOURCE_DIR}/assets ${CMAKE_BINARY_DIR}/assets
+        COMMENT "Copy assets to build directory"
+    )
+endif()
+
 # 测试配置 (用于单元测试)
 enable_testing()
 add_subdirectory(tests)

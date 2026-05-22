@@ -1,0 +1,29 @@
+# Build
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+Testing/
+_deps/
+lib/
+breakout
+*.o
+*.a
+*.d
+
+# Runtime / local
+save.json
+save.json.bak
+leaderboard.txt
+
+# Backup / patches
+*.backup
+*.bak
+*.patch
+homework-save-levels.patch
+
+# IDE
+.vscode/
+.cursor/

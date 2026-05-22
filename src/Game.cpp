@@ -1,8 +1,10 @@
 #include "Game.h"
+#include "JsonIO.h"
 
 #include <fstream>
 #include <iostream>
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <ctime>
 #include <memory>
@@ -267,6 +269,16 @@ Game::Game()
     screenWidth_ = config_.value("screen", json::object()).value("width", screenWidth_);
     screenHeight_ = config_.value("screen", json::object()).value("height", screenHeight_);
 
+    const json perf = config_.value("performance", json::object());
+    gridCols_ = perf.value("grid_cols", gridCols_);
+    gridRows_ = perf.value("grid_rows", gridRows_);
+    useSpatialGrid_ = perf.value("use_spatial_grid", useSpatialGrid_);
+    showGridDebug_ = perf.value("show_grid", showGridDebug_);
+    cellWidth_ = static_cast<float>(screenWidth_) / static_cast<float>(gridCols_);
+    cellHeight_ = static_cast<float>(screenHeight_) / static_cast<float>(gridRows_);
+    brickGrid_.assign(static_cast<size_t>(gridRows_),
+                      std::vector<std::vector<size_t>>(static_cast<size_t>(gridCols_)));
+
     const std::string title =
         config_.value("screen", json::object()).value("title", std::string("Breakout Game"));
     InitWindow(screenWidth_, screenHeight_, title.c_str());
@@ -274,13 +286,25 @@ Game::Game()
     SetTargetFPS(60);
     SetExitKey(0);
 
-    int btnW = 200, btnH = 40;
-    int startX = screenWidth_ / 2 - btnW / 2;
-    int startY = 200;
+    maxLevel_ = CountLevelFiles();
+    hasPendingSave_ = SaveFileExists(SAVE_PATH);
 
-    btnPlay_ = { (float)startX, (float)startY, (float)btnW, (float)btnH };
-    btnSettings_ = { (float)startX, (float)startY + 60, (float)btnW, (float)btnH };
-    btnQuit_ = { (float)startX, (float)startY + 120, (float)btnW, (float)btnH };
+    const int btnW = 200;
+    const int btnH = 40;
+    const int startX = screenWidth_ / 2 - btnW / 2;
+    int menuY = 200;
+
+    btnContinue_ = {0.0f, 0.0f, 0.0f, 0.0f};
+    if (hasPendingSave_) {
+        btnContinue_ = {(float)startX, (float)menuY, (float)btnW, (float)btnH};
+        menuY += 50;
+    }
+
+    btnPlay_ = {(float)startX, (float)menuY, (float)btnW, (float)btnH};
+    menuY += 50;
+    btnSettings_ = {(float)startX, (float)menuY, (float)btnW, (float)btnH};
+    menuY += 50;
+    btnQuit_ = {(float)startX, (float)menuY, (float)btnW, (float)btnH};
 
     LoadLeaderboard();
 }
@@ -325,17 +349,38 @@ void Game::Update() {
 }
 
 void Game::UpdateMenu() {
+    if (hasPendingSave_ && IsButtonClicked(btnContinue_)) {
+        state_ = GameState::PLAYING;
+        ContinueFromSave();
+    }
     if (IsButtonClicked(btnPlay_)) {
         state_ = GameState::PLAYING;
         ResetGame();
     }
-    if (IsButtonClicked(btnSettings_)) state_ = GameState::LEADERBOARD;
-    if (IsButtonClicked(btnQuit_)) exit(0);
+    if (IsButtonClicked(btnSettings_)) {
+        state_ = GameState::LEADERBOARD;
+    }
+    if (IsButtonClicked(btnQuit_)) {
+        exit(0);
+    }
 }
 
 void Game::UpdatePaused() {
-    if (IsKeyPressed(KEY_C)) state_ = GameState::PLAYING;
-    if (IsKeyPressed(KEY_Q)) state_ = GameState::MENU;
+    if (IsKeyPressed(KEY_C)) {
+        state_ = GameState::PLAYING;
+    }
+    if (IsKeyPressed(KEY_Q)) {
+        SaveProgress();
+        state_ = GameState::MENU;
+        hasPendingSave_ = true;
+    }
+    if (IsKeyPressed(KEY_E)) {
+        editingMode_ = !editingMode_;
+        jsonStatusMessage_ = editingMode_ ? "编辑模式：左键添加 / 右键删除 / S保存" : "";
+    }
+    if (editingMode_) {
+        UpdateEditor();
+    }
 }
 
 void Game::ClampPaddle(Paddle& paddle) {
@@ -350,16 +395,222 @@ void Game::ClampPaddle(Paddle& paddle) {
 
 void Game::RecordUpdatePlayingLatency(double startSeconds) {
     lastUpdatePlayingMs_ = static_cast<float>((GetTime() - startSeconds) * 1000.0);
+    estimatedDrawCalls_ = CountEstimatedDrawCalls();
 
     static int frameCounter = 0;
     if (frameCounter++ % 60 == 0) {
         TraceLog(LOG_INFO,
-                 "Total: %.2fms | Physics: %.2fms | Particles: %.2fms (Active: %d)",
+                 "Total: %.2fms | Physics: %.2fms | Particles: %.2fms | "
+                 "Checks: %d/%d bricks | Grid: %s | DrawCalls~%d",
                  static_cast<double>(lastUpdatePlayingMs_),
                  static_cast<double>(lastBrickCollisionMs_),
                  static_cast<double>(lastParticleUpdateMs_),
-                 activeParticleCount_);
+                 lastCollisionChecks_,
+                 activeBrickCount_,
+                 useSpatialGrid_ ? "ON" : "OFF",
+                 estimatedDrawCalls_);
     }
+}
+
+void Game::RebuildCollisionGrid() {
+    for (auto& row : brickGrid_) {
+        for (auto& cell : row) {
+            cell.clear();
+        }
+    }
+
+    activeBrickCount_ = 0;
+    for (size_t i = 0; i < bricks_.size(); ++i) {
+        if (!bricks_[i].active) {
+            continue;
+        }
+        ++activeBrickCount_;
+
+        const Rectangle& br = bricks_[i].rect;
+        const float cx = br.x + br.width * 0.5f;
+        const float cy = br.y + br.height * 0.5f;
+
+        int gx = static_cast<int>(cx / cellWidth_);
+        int gy = static_cast<int>(cy / cellHeight_);
+        if (gx < 0) gx = 0;
+        if (gy < 0) gy = 0;
+        if (gx >= gridCols_) gx = gridCols_ - 1;
+        if (gy >= gridRows_) gy = gridRows_ - 1;
+
+        brickGrid_[static_cast<size_t>(gy)][static_cast<size_t>(gx)].push_back(i);
+    }
+}
+
+void Game::GetBallGridCell(int& gx, int& gy) const {
+    gx = static_cast<int>(ball_.position.x / cellWidth_);
+    gy = static_cast<int>(ball_.position.y / cellHeight_);
+    if (gx < 0) gx = 0;
+    if (gy < 0) gy = 0;
+    if (gx >= gridCols_) gx = gridCols_ - 1;
+    if (gy >= gridRows_) gy = gridRows_ - 1;
+}
+
+bool Game::ProcessBrickHit(size_t brickIndex) {
+    Brick& brick = bricks_[brickIndex];
+    if (!brick.active) {
+        return false;
+    }
+
+    brick.active = false;
+    --activeBrickCount_;
+    ball_.velocity.y *= -1.0f;
+    score_ += 1;
+
+    if (IsAudioDeviceReady() && hitSound_.frameCount > 0) {
+        PlaySound(hitSound_);
+    }
+
+    EmitParticlesAtBrick(brick.rect, brick.color, 20);
+
+    if ((rand() % 100) < 30) {
+        PowerUpType type = static_cast<PowerUpType>(rand() % 3);
+        PowerUp powerUp({ brick.rect.x + brick.rect.width / 2, brick.rect.y }, type);
+        powerUp.duration = 5.0f;
+        powerUps_.push_back(powerUp);
+    }
+
+    return true;
+}
+
+bool Game::CheckBallBrickCollisionsSpatial() {
+    lastCollisionChecks_ = 0;
+    lastCollisionCandidates_ = 0;
+
+    const float ballR = ball_.radius;
+    const float bx = ball_.position.x;
+    const float by = ball_.position.y;
+
+    int ballGx = 0;
+    int ballGy = 0;
+    GetBallGridCell(ballGx, ballGy);
+
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const int gx = ballGx + dx;
+            const int gy = ballGy + dy;
+            if (gx < 0 || gy < 0 || gx >= gridCols_ || gy >= gridRows_) {
+                continue;
+            }
+
+            for (size_t idx : brickGrid_[static_cast<size_t>(gy)][static_cast<size_t>(gx)]) {
+                ++lastCollisionCandidates_;
+                Brick& brick = bricks_[idx];
+                if (!brick.active) {
+                    continue;
+                }
+
+                const Rectangle& br = brick.rect;
+                if (bx + ballR < br.x || bx - ballR > br.x + br.width || by + ballR < br.y ||
+                    by - ballR > br.y + br.height) {
+                    continue;
+                }
+
+                ++lastCollisionChecks_;
+                if (!CheckCollisionCircleRec(ball_.position, ballR, br)) {
+                    continue;
+                }
+
+                return ProcessBrickHit(idx);
+            }
+        }
+    }
+
+    return false;
+}
+
+bool Game::CheckBallBrickCollisionsNaive() {
+    lastCollisionChecks_ = 0;
+    lastCollisionCandidates_ = activeBrickCount_;
+
+    const float ballR = ball_.radius;
+    const float bx = ball_.position.x;
+    const float by = ball_.position.y;
+
+    for (size_t i = 0; i < bricks_.size(); ++i) {
+        if (!bricks_[i].active) {
+            continue;
+        }
+
+        const Rectangle& br = bricks_[i].rect;
+        if (bx + ballR < br.x || bx - ballR > br.x + br.width || by + ballR < br.y ||
+            by - ballR > br.y + br.height) {
+            continue;
+        }
+
+        ++lastCollisionChecks_;
+        if (!CheckCollisionCircleRec(ball_.position, ballR, br)) {
+            continue;
+        }
+
+        return ProcessBrickHit(i);
+    }
+
+    return false;
+}
+
+void Game::DrawCollisionGridDebug() const {
+    for (int gx = 0; gx <= gridCols_; ++gx) {
+        const float x = static_cast<float>(gx) * cellWidth_;
+        DrawLineV({x, 0.0f}, {x, static_cast<float>(screenHeight_)}, Fade(SKYBLUE, 0.35f));
+    }
+    for (int gy = 0; gy <= gridRows_; ++gy) {
+        const float y = static_cast<float>(gy) * cellHeight_;
+        DrawLineV({0.0f, y}, {static_cast<float>(screenWidth_), y}, Fade(SKYBLUE, 0.35f));
+    }
+
+    int ballGx = 0;
+    int ballGy = 0;
+    GetBallGridCell(ballGx, ballGy);
+
+    const Rectangle highlight = {
+        static_cast<float>(ballGx) * cellWidth_,
+        static_cast<float>(ballGy) * cellHeight_,
+        cellWidth_,
+        cellHeight_
+    };
+    DrawRectangleRec(highlight, Fade(YELLOW, 0.25f));
+    DrawRectangleLinesEx(highlight, 2, ORANGE);
+
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const int gx = ballGx + dx;
+            const int gy = ballGy + dy;
+            if (gx < 0 || gy < 0 || gx >= gridCols_ || gy >= gridRows_) {
+                continue;
+            }
+            const Rectangle neighbor = {
+                static_cast<float>(gx) * cellWidth_,
+                static_cast<float>(gy) * cellHeight_,
+                cellWidth_,
+                cellHeight_
+            };
+            DrawRectangleLinesEx(neighbor, 1, Fade(GREEN, 0.6f));
+        }
+    }
+}
+
+int Game::CountEstimatedDrawCalls() const {
+    int count = 3; // ball + 2 paddles
+    for (const auto& brick : bricks_) {
+        if (brick.active) {
+            ++count;
+        }
+    }
+    for (const auto& p : powerUps_) {
+        if (p.active) {
+            ++count;
+        }
+    }
+    count += activeParticleCount_;
+    if (backgroundTexture_.id != 0) {
+        ++count;
+    }
+    return count;
 }
 
 void Game::ClearParticlePool() {
@@ -457,8 +708,7 @@ void Game::UpdatePlaying() {
         if (status == std::future_status::ready) {
             try {
                 LevelData data = loadFuture_.get();
-                int targetLevel = currentLevel_ == 1 && bricks_.empty() ? 1 : currentLevel_ + 1;
-                ApplyLoadedLevel(data, targetLevel);
+                ApplyLoadedLevel(data, pendingLoadLevel_);
             } catch (...) {
                 isLoading_ = false;
                 loadFailed_ = true;
@@ -472,6 +722,24 @@ void Game::UpdatePlaying() {
     if (loadFailed_) {
         RecordUpdatePlayingLatency(startFrame);
         return;
+    }
+
+    if (IsKeyPressed(KEY_E)) {
+        editingMode_ = !editingMode_;
+        jsonStatusMessage_ = editingMode_ ? "编辑模式：左键添加 / 右键删除 / S保存" : "";
+    }
+    if (editingMode_) {
+        UpdateEditor();
+        if (IsKeyPressed(KEY_ESCAPE)) {
+            state_ = GameState::PAUSED;
+        }
+        RecordUpdatePlayingLatency(startFrame);
+        return;
+    }
+
+    if (IsKeyPressed(KEY_F5)) {
+        SaveProgress();
+        jsonStatusMessage_ = "进度已保存";
     }
 
     // 更新挡板
@@ -571,44 +839,12 @@ void Game::UpdatePlaying() {
         ball_.velocity.x = 8.0f * (hitPos - 0.5f);
     }
 
-    // 球–砖碰撞（分段计时；对应控制台「Physics」；AABB 粗筛 + CheckCollisionCircleRec）
+    // 球–砖碰撞（分段计时；网格法或朴素 O(N) 可切换对比）
     const double startCollision = GetTime();
-    {
-        const float ballR = ball_.radius;
-        const float bx = ball_.position.x;
-        const float by = ball_.position.y;
-        for (auto& brick : bricks_) {
-            if (!brick.active) {
-                continue;
-            }
-            const Rectangle& br = brick.rect;
-            if (bx + ballR < br.x || bx - ballR > br.x + br.width || by + ballR < br.y ||
-                by - ballR > br.y + br.height) {
-                continue;
-            }
-            if (!CheckCollisionCircleRec(ball_.position, ballR, br)) {
-                continue;
-            }
-            brick.active = false;
-            ball_.velocity.y *= -1.0f;
-            score_ += 1;
-
-            if (IsAudioDeviceReady() && hitSound_.frameCount > 0) {
-                PlaySound(hitSound_);
-            }
-
-            EmitParticlesAtBrick(brick.rect, brick.color, 20);
-
-            // 道具掉落
-            if ((rand() % 100) < 30) {
-                PowerUpType type = static_cast<PowerUpType>(rand() % 3);
-                PowerUp powerUp({ brick.rect.x + brick.rect.width / 2, brick.rect.y }, type);
-                powerUp.duration = 5.0f;
-                powerUps_.push_back(powerUp);
-            }
-
-            break;
-        }
+    if (useSpatialGrid_) {
+        (void)CheckBallBrickCollisionsSpatial();
+    } else {
+        (void)CheckBallBrickCollisionsNaive();
     }
     lastBrickCollisionMs_ = static_cast<float>((GetTime() - startCollision) * 1000.0);
 
@@ -629,6 +865,8 @@ void Game::UpdatePlaying() {
     if (ball_.position.y + ball_.radius >= screenHeight_) {
         lives_--;
         if (lives_ <= 0) {
+            DeleteSave();
+            hasPendingSave_ = false;
             state_ = GameState::GAME_OVER;
             SaveScore();
         } else {
@@ -646,8 +884,13 @@ void Game::UpdatePlaying() {
 
     if (allBricksDestroyed) {
         if (currentLevel_ < maxLevel_) {
-            StartLevelLoad(currentLevel_ + 1);
+            const int nextLevel = currentLevel_ + 1;
+            SaveProgress(nextLevel);
+            hasPendingSave_ = true;
+            StartLevelLoad(nextLevel);
         } else {
+            DeleteSave();
+            hasPendingSave_ = false;
             state_ = GameState::GAME_OVER;
             SaveScore();
         }
@@ -662,6 +905,23 @@ void Game::UpdatePlaying() {
         }
     }
 
+    // 性能演示快捷键（PPT 第4–9页）
+    if (IsKeyPressed(KEY_G)) {
+        showGridDebug_ = !showGridDebug_;
+    }
+    if (IsKeyPressed(KEY_B)) {
+        useSpatialGrid_ = !useSpatialGrid_;
+        TraceLog(LOG_INFO, "Collision mode: %s", useSpatialGrid_ ? "Spatial Grid" : "Naive O(N)");
+    }
+    if (IsKeyPressed(KEY_SPACE)) {
+        EmitParticlesAtBrick(
+            { ball_.position.x - ball_.radius, ball_.position.y - ball_.radius,
+              ball_.radius * 2.0f, ball_.radius * 2.0f },
+            ORANGE,
+            100
+        );
+    }
+
     if (IsKeyPressed(KEY_ESCAPE)) state_ = GameState::PAUSED;
 
     RecordUpdatePlayingLatency(startFrame);
@@ -672,7 +932,11 @@ void Game::UpdatePlaying() {
 // ============================================================
 
 void Game::ResetGame() {
-    lives_ = config_["game"]["max_lives"].get<int>();
+    DeleteSave();
+    hasPendingSave_ = false;
+    editingMode_ = false;
+
+    lives_ = config_.value("game", json::object()).value("max_lives", 5);
     score_ = 0;
 
     float speed = config_["ball"]["speed_base"].get<float>();
@@ -715,6 +979,7 @@ void Game::ResetGame() {
     loadFailed_ = false;
     loadingMessage_.clear();
 
+    SaveProgress(1);
     StartLevelLoad(1);
 }
 
@@ -752,23 +1017,19 @@ Ball Game::GetBall() const {
 // ============================================================
 
 void Game::LoadConfig() {
-    std::ifstream file("config.json");
-    if (file.is_open()) {
-        file >> config_;
-    } else {
-        config_ = {
-            {"screen", {{"width", 800}, {"height", 600}, {"title", "Breakout Game"}}},
-            {"paddle", {{"width", 100.0}, {"height", 10.0}, {"speed", 7.0}, {"color", {0, 0, 139, 255}}}},
-            {"ball", {{"radius", 10.0}, {"speed_base", 4.0}, {"color", {139, 0, 0, 255}}}},
-            {"bricks", {{"rows", 5}, {"cols", 10}, {"width", 75}, {"height", 20}, {"spacing", 5}, {"offset_x", 25}, {"offset_y", 50}}},
-            {"game", {{"max_lives", 5}}},
-            {"powerups", {
-                {"paddle_extend", {{"extra_width", 40}, {"duration", 5}, {"drop_rate", 0.3}}},
-                {"multi_ball", {{"extra_balls", 2}, {"duration", 0}, {"drop_rate", 0.2}}},
-                {"slow_ball", {{"speed_factor", 0.7}, {"duration", 5}, {"drop_rate", 0.25}}}
-            }}
-        };
-    }
+    const json fallback = {
+        {"screen", {{"width", 800}, {"height", 600}, {"title", "Breakout Game"}}},
+        {"paddle", {{"width", 100.0}, {"height", 10.0}, {"speed", 7.0}, {"color", {0, 0, 139, 255}}}},
+        {"ball", {{"radius", 10.0}, {"speed_base", 4.0}, {"color", {139, 0, 0, 255}}}},
+        {"bricks", {{"rows", 5}, {"cols", 10}, {"width", 75}, {"height", 20}, {"spacing", 5}, {"offset_x", 25}, {"offset_y", 50}}},
+        {"game", {{"max_lives", 5}}},
+        {"powerups", {
+            {"paddle_extend", {{"extra_width", 40}, {"duration", 5}, {"drop_rate", 0.3}}},
+            {"multi_ball", {{"extra_balls", 2}, {"duration", 0}, {"drop_rate", 0.2}}},
+            {"slow_ball", {{"speed_factor", 0.7}, {"duration", 5}, {"drop_rate", 0.25}}}
+        }}
+    };
+    config_ = LoadJSONWithFallback("config.json", fallback);
 }
 
 void Game::LoadLeaderboard() {
@@ -849,6 +1110,60 @@ void Game::DrawUI() {
     if (slowBallTimer_ > 0.0f) {
         DrawText(TextFormat("Slow Ball: %.1f", slowBallTimer_), 10, 308, 20, YELLOW);
     }
+
+    DrawText(TextFormat("Collision: %s", useSpatialGrid_ ? "Grid" : "Naive"), 10, 338, 16, DARKGREEN);
+    DrawText(TextFormat("Checks: %d (cand %d / %d bricks)", lastCollisionChecks_,
+                        lastCollisionCandidates_, activeBrickCount_),
+             10, 358, 14, DARKGRAY);
+    DrawText(TextFormat("DrawCalls~: %d", estimatedDrawCalls_), 10, 378, 14, DARKGRAY);
+    DrawText("G:grid  B:toggle  Space:particles  F5:save", 10, 398, 12, GRAY);
+    if (!jsonStatusMessage_.empty()) {
+        DrawText(jsonStatusMessage_.c_str(), 10, 418, 14, MAROON);
+    }
+}
+
+void Game::DrawMenu() {
+    DrawRectangle(0, 0, screenWidth_, screenHeight_, Fade(BLACK, 0.3f));
+    DrawText("BREAKOUT", screenWidth_ / 2 - 80, 100, 40, BLACK);
+
+    struct MenuBtn {
+        Rectangle* rect;
+        const char* label;
+        int xOffset;
+        Color hoverColor;
+        Color normalColor;
+    };
+
+    MenuBtn items[4];
+    int count = 0;
+
+    if (hasPendingSave_) {
+        items[count++] = {&btnContinue_, "CONTINUE", 50, {100, 200, 255, 255}, {200, 230, 255, 255}};
+    }
+    items[count++] = {&btnPlay_, hasPendingSave_ ? "NEW GAME" : "PLAY", 55, {255, 100, 100, 255}, LIGHTGRAY};
+    items[count++] = {&btnSettings_, "SETTINGS", 45, {100, 255, 100, 255}, LIGHTGRAY};
+    items[count++] = {&btnQuit_, "QUIT", 70, {100, 100, 255, 255}, LIGHTGRAY};
+
+    for (int i = 0; i < count; ++i) {
+        const MenuBtn& item = items[i];
+        const bool hover = CheckCollisionPointRec(GetMousePosition(), *item.rect);
+        const float scale = hover ? 1.1f : 1.0f;
+        const Color color = hover ? item.hoverColor : item.normalColor;
+
+        const Rectangle scaledRect = {
+            item.rect->x - item.rect->width * (scale - 1.0f) / 2.0f,
+            item.rect->y - item.rect->height * (scale - 1.0f) / 2.0f,
+            item.rect->width * scale,
+            item.rect->height * scale
+        };
+
+        DrawRectangleRec(scaledRect, color);
+        DrawText(item.label,
+                 static_cast<int>(scaledRect.x + item.xOffset * scale),
+                 static_cast<int>(scaledRect.y + 10.0f * scale),
+                 static_cast<int>(20.0f * scale),
+                 BLACK);
+    }
 }
 
 void Game::Draw() {
@@ -857,34 +1172,7 @@ void Game::Draw() {
 
     switch (state_) {
         case GameState::MENU:
-            DrawRectangle(0, 0, screenWidth_, screenHeight_, Fade(BLACK, 0.3f));
-            DrawText("BREAKOUT", screenWidth_ / 2 - 80, 100, 40, BLACK);
-
-            Color color;
-            for (auto& btn : {&btnPlay_, &btnSettings_, &btnQuit_}) {
-                bool hover = CheckCollisionPointRec(GetMousePosition(), *btn);
-                float scale = hover ? 1.1f : 1.0f;
-                color = hover ? Color{255, 100, 100, 255} : LIGHTGRAY;
-                if (btn == &btnSettings_) color = hover ? Color{100, 255, 100, 255} : LIGHTGRAY;
-                if (btn == &btnQuit_) color = hover ? Color{100, 100, 255, 255} : LIGHTGRAY;
-
-                Rectangle scaledRect = {
-                    btn->x - btn->width * (scale - 1) / 2,
-                    btn->y - btn->height * (scale - 1) / 2,
-                    btn->width * scale,
-                    btn->height * scale
-                };
-
-                DrawRectangleRec(scaledRect, color);
-                const char* txt = (btn == &btnPlay_) ? "PLAY" :
-                                  (btn == &btnSettings_) ? "SETTINGS" : "QUIT";
-                int xOffset = (btn == &btnPlay_) ? 70 : (btn == &btnSettings_) ? 55 : 75;
-                DrawText(txt,
-                         (int)(scaledRect.x + xOffset * scale),
-                         (int)(scaledRect.y + 10 * scale),
-                         (int)(20 * scale),
-                         BLACK);
-            }
+            DrawMenu();
             break;
 
         case GameState::PLAYING:
@@ -913,6 +1201,10 @@ void Game::Draw() {
                     paddle1_.Draw();
                     paddle2_.Draw();
 
+                    if (showGridDebug_) {
+                        DrawCollisionGridDebug();
+                    }
+
                     for (auto& brick : bricks_) {
                         if (!brick.active) continue;
 
@@ -938,6 +1230,7 @@ void Game::Draw() {
                         }
                     }
                     DrawUI();
+                    DrawEditorOverlay();
 
                     if (loadCompleteTimer_ > 0.0f) {
                         const char* msg = "Load Complete!";
@@ -987,6 +1280,7 @@ void Game::Draw() {
                 }
             }
             DrawUI();
+            DrawEditorOverlay();
             DrawRectangle(0, 0, screenWidth_, screenHeight_, {0, 0, 0, 150});
             DrawRectangle(screenWidth_ / 2 - 100, screenHeight_ / 2 - 50, 200, 100, LIGHTGRAY);
             DrawText("PAUSED", screenWidth_ / 2 - 40, screenHeight_ / 2 - 40, 20, BLACK);
@@ -1041,15 +1335,411 @@ bool Game::IsButtonClicked(const Rectangle& btn) {
     return IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && CheckCollisionPointRec(GetMousePosition(), btn);
 }
 
+Color Game::ColorFromPatternChar(char ch) const {
+    switch (ch) {
+        case 'R': case 'r': return RED;
+        case 'G': case 'g': return GREEN;
+        case 'B': case 'b': return BLUE;
+        case 'Y': case 'y': return YELLOW;
+        case 'C': case 'c': return SKYBLUE;
+        case 'O': case 'o': return ORANGE;
+        case 'P': case 'p': return PINK;
+        default: return GRAY;
+    }
+}
+
+Color Game::ColorFromLayoutCode(int code, const json& colorMap) const {
+    if (code == 0) {
+        return BLANK;
+    }
+
+    const std::string key = std::to_string(code);
+    if (colorMap.contains(key)) {
+        const std::string name = colorMap[key].get<std::string>();
+        if (name == "red") return RED;
+        if (name == "yellow" || name == "gold") return GOLD;
+        if (name == "green") return GREEN;
+        if (name == "blue") return BLUE;
+        if (name == "orange") return ORANGE;
+        if (name == "pink") return PINK;
+        if (name == "cyan" || name == "skyblue") return SKYBLUE;
+    }
+
+    if (code == 1) return RED;
+    if (code == 2) return GOLD;
+    if (code == 3) return MAROON;
+    return GRAY;
+}
+
+json Game::GetDefaultLevelJson(int level) const {
+    json fallback = {
+        {"background", "assets/bg_level1.png"},
+        {"brick_texture", "assets/brick_level1.png"},
+        {"hit_sound", "assets/hit1.wav"},
+        {"brick_width", 75},
+        {"brick_height", 20},
+        {"spacing", 5},
+        {"offset_x", 60},
+        {"offset_y", 60},
+        {"pattern", json::array({"RRRRRRRR", "GGGGGGGG"})}
+    };
+
+    if (level == 2) {
+        fallback["background"] = "assets/bg_level2.png";
+        fallback["brick_texture"] = "assets/brick_level2.png";
+        fallback["hit_sound"] = "assets/hit2.wav";
+        fallback["pattern"] = json::array({"RRRRRRRRRR", "GGGGGGGGGG", "BBBBBBBBBB"});
+    } else if (level == 3) {
+        fallback["background"] = "assets/bg_level3.png";
+        fallback["brick_texture"] = "assets/brick_level3.png";
+        fallback["hit_sound"] = "assets/hit3.wav";
+        fallback["pattern"] = json::array({"R...........R", "RG.........GR", "RGB.......BGR"});
+    }
+
+    return fallback;
+}
+
+LevelData Game::ParseLevelJson(const json& levelJson, int level) const {
+    LevelData data;
+    data.backgroundTexturePath = levelJson.value("background", "assets/bg_level1.png");
+    data.brickTexturePath = levelJson.value("brick_texture", "assets/brick_level1.png");
+    data.hitSoundPath = levelJson.value("hit_sound", "assets/hit1.wav");
+
+    const json bricksCfg = levelJson.value("bricks", json::object());
+    const float bWidth = levelJson.value("brick_width", bricksCfg.value("width", 75.0f));
+    const float bHeight = levelJson.value("brick_height", bricksCfg.value("height", 20.0f));
+    const float spacing = levelJson.value("spacing", bricksCfg.value("spacing", 5.0f));
+    const float offsetX = levelJson.value("offset_x", bricksCfg.value("offset_x", 60.0f));
+    const float offsetY = levelJson.value("offset_y", bricksCfg.value("offset_y", 60.0f));
+
+    data.bricks.clear();
+
+    if (levelJson.contains("pattern") && levelJson["pattern"].is_array()) {
+        const auto& pattern = levelJson["pattern"];
+        for (size_t r = 0; r < pattern.size(); ++r) {
+            const std::string row = pattern[r].get<std::string>();
+            for (size_t c = 0; c < row.size(); ++c) {
+                const char ch = row[c];
+                if (ch == '.' || ch == '0' || ch == ' ') {
+                    continue;
+                }
+                data.bricks.emplace_back(
+                    Vector2{offsetX + static_cast<float>(c) * (bWidth + spacing),
+                            offsetY + static_cast<float>(r) * (bHeight + spacing)},
+                    bWidth,
+                    bHeight,
+                    ColorFromPatternChar(ch)
+                );
+            }
+        }
+        return data;
+    }
+
+    if (bricksCfg.contains("layout") && bricksCfg["layout"].is_array()) {
+        const auto& layout = bricksCfg["layout"];
+        const int rows = bricksCfg.value("rows", static_cast<int>(layout.size()));
+        const int cols = bricksCfg.value("cols", layout.empty() ? 0 : static_cast<int>(layout[0].size()));
+        const json colorMap = bricksCfg.value("color_map", json::object());
+
+        for (int i = 0; i < rows; ++i) {
+            if (i >= static_cast<int>(layout.size())) {
+                break;
+            }
+            for (int j = 0; j < cols; ++j) {
+                if (j >= static_cast<int>(layout[i].size())) {
+                    break;
+                }
+                const int code = layout[i][j].get<int>();
+                if (code == 0) {
+                    continue;
+                }
+                data.bricks.emplace_back(
+                    Vector2{offsetX + static_cast<float>(j) * (bWidth + spacing),
+                            offsetY + static_cast<float>(i) * (bHeight + spacing)},
+                    bWidth,
+                    bHeight,
+                    ColorFromLayoutCode(code, colorMap)
+                );
+            }
+        }
+        return data;
+    }
+
+    TraceLog(LOG_WARNING, "关卡 %d JSON 缺少 pattern/layout，使用空布局", level);
+    return data;
+}
+
+int Game::CountLevelFiles() const {
+    int count = 0;
+    for (int i = 1; i <= 99; ++i) {
+        const std::string path = "levels/level" + std::to_string(i) + ".json";
+        if (!SaveFileExists(path)) {
+            break;
+        }
+        count = i;
+    }
+    return count > 0 ? count : 3;
+}
+
+void Game::SaveProgress(int levelOverride) {
+    json save;
+    save["version"] = SAVE_VERSION;
+    save["current_level"] = levelOverride >= 0 ? levelOverride : currentLevel_;
+    save["score"] = score_;
+    save["lives"] = lives_;
+    save["powerups"] = {
+        {"paddle_extend_remaining", std::max(paddle1_.extendTimer, paddle2_.extendTimer)},
+        {"slow_ball_remaining", std::max(0.0f, slowBallTimer_)}
+    };
+
+    std::ofstream file(SAVE_PATH);
+    if (!file.is_open()) {
+        TraceLog(LOG_ERROR, "无法写入存档: %s", SAVE_PATH);
+        jsonStatusMessage_ = "存档写入失败";
+        return;
+    }
+    file << save.dump(4);
+    hasPendingSave_ = true;
+}
+
+bool Game::LoadGame() {
+    if (!SaveFileExists(SAVE_PATH)) {
+        return false;
+    }
+
+    try {
+        std::ifstream file(SAVE_PATH);
+        json save;
+        file >> save;
+
+        int version = save.value("version", 1);
+        if (version > SAVE_VERSION) {
+            TraceLog(LOG_WARNING, "存档版本过新 (%d)，使用默认值", version);
+            return false;
+        }
+
+        currentLevel_ = save.value("current_level", 1);
+        score_ = save.value("score", 0);
+        lives_ = save.value("lives", config_.value("game", json::object()).value("max_lives", 5));
+
+        if (lives_ < 1) {
+            TraceLog(LOG_WARNING, "存档生命值为 0，无法继续");
+            return false;
+        }
+        if (currentLevel_ < 1) currentLevel_ = 1;
+        if (currentLevel_ > maxLevel_) currentLevel_ = maxLevel_;
+
+        const json powerups = save.value("powerups", json::object());
+        const float paddleExtend = powerups.value("paddle_extend_remaining", 0.0f);
+        slowBallTimer_ = powerups.value("slow_ball_remaining", 0.0f);
+
+        paddle1_.extendTimer = paddleExtend;
+        paddle2_.extendTimer = paddleExtend;
+        if (paddleExtend > 0.0f) {
+            const float extra = config_.value("powerups", json::object())
+                                    .value("paddle_extend", json::object())
+                                    .value("extra_width", 40.0f);
+            paddle1_.width = paddle1_.originalWidth + extra;
+            paddle2_.width = paddle2_.originalWidth + extra;
+        }
+
+        if (version == 1) {
+            TraceLog(LOG_INFO, "旧版存档(v1)已迁移到 v%d", SAVE_VERSION);
+            SaveProgress();
+        }
+
+        jsonStatusMessage_ = TextFormat("读档成功：关卡 %d", currentLevel_);
+        return true;
+    } catch (const std::exception& e) {
+        TraceLog(LOG_ERROR, "读档失败: %s", e.what());
+        jsonStatusMessage_ = "存档损坏，已忽略";
+        return false;
+    }
+}
+
+void Game::DeleteSave() {
+    std::remove(SAVE_PATH);
+}
+
+void Game::ContinueFromSave() {
+    if (!LoadGame()) {
+        ResetGame();
+        return;
+    }
+
+    const float speed = config_.value("ball", json::object()).value("speed_base", 4.0f);
+    const float radius = config_.value("ball", json::object()).value("radius", 10.0f);
+    ball_ = Ball({screenWidth_ / 2.0f, screenHeight_ / 2.0f}, {speed, -speed}, radius, RED);
+
+    const float paddleWidth = config_.value("paddle", json::object()).value("width", 100.0f);
+    const float paddleHeight = config_.value("paddle", json::object()).value("height", 10.0f);
+    paddle1_.originalWidth = paddleWidth;
+    paddle2_.originalWidth = paddleWidth;
+    paddle1_.height = paddleHeight;
+    paddle2_.height = paddleHeight;
+    paddle1_.position = {screenWidth_ * 0.25f - paddleWidth / 2.0f, (float)screenHeight_ - 50};
+    paddle2_.position = {screenWidth_ * 0.75f - paddleWidth / 2.0f, (float)screenHeight_ - 50};
+
+    powerUps_.clear();
+    ClearParticlePool();
+    ballRespawnTimer_ = 0.0f;
+    originalVelocities_.clear();
+    editingMode_ = false;
+
+    bricks_.clear();
+    isLoading_ = false;
+    loadFailed_ = false;
+    StartLevelLoad(currentLevel_);
+}
+
+void Game::UpdateEditor() {
+    if (IsKeyPressed(KEY_S)) {
+        SaveLayoutToJson("levels/custom.json");
+        jsonStatusMessage_ = "已保存到 levels/custom.json";
+    }
+
+    const float stepX = editorBrickWidth_ + editorSpacing_;
+    const float stepY = editorBrickHeight_ + editorSpacing_;
+
+    if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+        const Vector2 mouse = GetMousePosition();
+        const float x = std::floor(mouse.x / stepX) * stepX;
+        const float y = std::floor(mouse.y / stepY) * stepY;
+        const Rectangle cell = {x, y, editorBrickWidth_, editorBrickHeight_};
+
+        for (const auto& brick : bricks_) {
+            if (brick.active && CheckCollisionRecs(cell, brick.rect)) {
+                return;
+            }
+        }
+
+        bricks_.emplace_back(Vector2{x, y}, editorBrickWidth_, editorBrickHeight_, ORANGE);
+        RebuildCollisionGrid();
+    }
+
+    if (IsMouseButtonPressed(MOUSE_RIGHT_BUTTON)) {
+        const Vector2 mouse = GetMousePosition();
+        for (auto& brick : bricks_) {
+            if (!brick.active) {
+                continue;
+            }
+            if (CheckCollisionPointRec(mouse, brick.rect)) {
+                brick.active = false;
+                --activeBrickCount_;
+                RebuildCollisionGrid();
+                break;
+            }
+        }
+    }
+}
+
+void Game::DrawEditorOverlay() {
+    if (!editingMode_) {
+        return;
+    }
+
+    DrawRectangle(0, 0, screenWidth_, 36, Fade(BLACK, 0.65f));
+    DrawText("EDIT MODE  |  LMB:add  RMB:del  S:save  E:exit  ESC:pause",
+             10, 10, 16, YELLOW);
+
+    const float stepX = editorBrickWidth_ + editorSpacing_;
+    const float stepY = editorBrickHeight_ + editorSpacing_;
+    for (float x = 0.0f; x < screenWidth_; x += stepX) {
+        DrawLineV({x, 0.0f}, {x, (float)screenHeight_}, Fade(SKYBLUE, 0.2f));
+    }
+    for (float y = 0.0f; y < screenHeight_; y += stepY) {
+        DrawLineV({0.0f, y}, {(float)screenWidth_, y}, Fade(SKYBLUE, 0.2f));
+    }
+}
+
+void Game::SaveLayoutToJson(const std::string& path) {
+    if (bricks_.empty()) {
+        TraceLog(LOG_WARNING, "没有砖块可保存");
+        return;
+    }
+
+    float minX = bricks_[0].rect.x;
+    float minY = bricks_[0].rect.y;
+    float maxX = minX;
+    float maxY = minY;
+    float bW = bricks_[0].rect.width;
+    float bH = bricks_[0].rect.height;
+
+    for (const auto& brick : bricks_) {
+        if (!brick.active) {
+            continue;
+        }
+        minX = std::min(minX, brick.rect.x);
+        minY = std::min(minY, brick.rect.y);
+        maxX = std::max(maxX, brick.rect.x);
+        maxY = std::max(maxY, brick.rect.y);
+        bW = brick.rect.width;
+        bH = brick.rect.height;
+    }
+
+    const float spacing = editorSpacing_;
+    const int cols = static_cast<int>((maxX - minX) / (bW + spacing)) + 1;
+    const int rows = static_cast<int>((maxY - minY) / (bH + spacing)) + 1;
+
+    json pattern = json::array();
+    for (int r = 0; r < rows; ++r) {
+        std::string row;
+        row.reserve(static_cast<size_t>(cols));
+        for (int c = 0; c < cols; ++c) {
+            const Rectangle cell = {
+                minX + static_cast<float>(c) * (bW + spacing),
+                minY + static_cast<float>(r) * (bH + spacing),
+                bW,
+                bH
+            };
+            bool found = false;
+            for (const auto& brick : bricks_) {
+                if (brick.active && CheckCollisionRecs(cell, brick.rect)) {
+                    row.push_back('R');
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                row.push_back('.');
+            }
+        }
+        pattern.push_back(row);
+    }
+
+    json out = {
+        {"background", "assets/bg_level1.png"},
+        {"brick_texture", "assets/brick_level1.png"},
+        {"hit_sound", "assets/hit1.wav"},
+        {"brick_width", bW},
+        {"brick_height", bH},
+        {"spacing", spacing},
+        {"offset_x", minX},
+        {"offset_y", minY},
+        {"pattern", pattern}
+    };
+
+    std::ofstream file(path);
+    if (file.is_open()) {
+        file << out.dump(4);
+        TraceLog(LOG_INFO, "关卡布局已保存: %s", path.c_str());
+    }
+}
+
 void Game::StartLevelLoad(int level) {
     if (level > maxLevel_) {
+        DeleteSave();
+        hasPendingSave_ = false;
         state_ = GameState::GAME_OVER;
         SaveScore();
         return;
     }
 
-    if (isLoading_) return;
+    if (isLoading_) {
+        return;
+    }
 
+    pendingLoadLevel_ = level;
     isLoading_ = true;
     loadReady_ = false;
     loadFailed_ = false;
@@ -1061,95 +1751,19 @@ void Game::StartLevelLoad(int level) {
 }
 
 LevelData Game::BuildLevelData(int level) {
-    LevelData data;
-
-    float bWidth = config_["bricks"]["width"].get<float>();
-    float bHeight = config_["bricks"]["height"].get<float>();
-    float spacing = config_["bricks"]["spacing"].get<float>();
-
-    switch (level) {
-        case 1: {
-            data.backgroundTexturePath = "assets/bg_level1.png";
-            data.brickTexturePath = "assets/brick_level1.png";
-            data.hitSoundPath = "assets/hit1.wav";
-
-            int rows = 4;
-            int cols = 8;
-            float offsetX = 60;
-            float offsetY = 60;
-
-            data.bricks.clear();
-            for (int r = 0; r < rows; ++r) {
-                for (int c = 0; c < cols; ++c) {
-                    data.bricks.emplace_back(
-                        Vector2{offsetX + c * (bWidth + spacing), offsetY + r * (bHeight + spacing)},
-                        bWidth, bHeight,
-                        ORANGE
-                    );
-                }
-            }
-            break;
-        }
-
-        case 2: {
-            data.backgroundTexturePath = "assets/bg_level2.png";
-            data.brickTexturePath = "assets/brick_level2.png";
-            data.hitSoundPath = "assets/hit2.wav";
-
-            int rows = 5;
-            int cols = 10;
-            float offsetX = 30;
-            float offsetY = 50;
-
-            data.bricks.clear();
-            for (int r = 0; r < rows; ++r) {
-                for (int c = 0; c < cols; ++c) {
-                    if (r == 2 && (c == 4 || c == 5)) continue;
-
-                    data.bricks.emplace_back(
-                        Vector2{offsetX + c * (bWidth + spacing), offsetY + r * (bHeight + spacing)},
-                        bWidth, bHeight,
-                        SKYBLUE
-                    );
-                }
-            }
-            break;
-        }
-
-        case 3: {
-            data.backgroundTexturePath = "assets/bg_level3.png";
-            data.brickTexturePath = "assets/brick_level3.png";
-            data.hitSoundPath = "assets/hit3.wav";
-
-            int rows = 6;
-            int cols = 12;
-            float offsetX = 20;
-            float offsetY = 40;
-
-            data.bricks.clear();
-            for (int r = 0; r < rows; ++r) {
-                for (int c = 0; c < cols; ++c) {
-                    if (c < r || c >= cols - r) continue;
-
-                    data.bricks.emplace_back(
-                        Vector2{offsetX + c * (bWidth + spacing), offsetY + r * (bHeight + spacing)},
-                        bWidth, bHeight,
-                        PINK
-                    );
-                }
-            }
-            break;
-        }
-
-        default:
-            break;
-    }
-
-    return data;
+    const std::string path = "levels/level" + std::to_string(level) + ".json";
+    const json levelJson = LoadJSONWithFallback(path, GetDefaultLevelJson(level));
+    return ParseLevelJson(levelJson, level);
 }
 
 void Game::ApplyLoadedLevel(const LevelData& data, int level) {
+    bricks_.clear();
     bricks_ = data.bricks;
+
+    if (!bricks_.empty()) {
+        editorBrickWidth_ = bricks_[0].rect.width;
+        editorBrickHeight_ = bricks_[0].rect.height;
+    }
 
     if (backgroundTexture_.id != 0) {
         UnloadTexture(backgroundTexture_);
@@ -1169,9 +1783,12 @@ void Game::ApplyLoadedLevel(const LevelData& data, int level) {
     hitSound_ = LoadSound(data.hitSoundPath.c_str());
 
     currentLevel_ = std::min(level, maxLevel_);
+    RebuildCollisionGrid();
     loadReady_ = true;
     isLoading_ = false;
+    loadFailed_ = false;
     loadingMessage_.clear();
+    SaveProgress();
 }
 
 void Game::DrawLoadingScreen() {

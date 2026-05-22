@@ -1,0 +1,16 @@
+{
+    "background": "assets/bg_level1.png",
+    "brick_texture": "assets/brick_level1.png",
+    "hit_sound": "assets/hit1.wav",
+    "brick_width": 75,
+    "brick_height": 20,
+    "spacing": 5,
+    "offset_x": 60,
+    "offset_y": 60,
+    "pattern": [
+        "RRRRRRRR",
+        "GGGGGGGG",
+        "BBBBBBBB",
+        "YYYYYYYY"
+    ]
+}

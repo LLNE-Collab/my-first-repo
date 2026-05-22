@@ -12,6 +12,8 @@
 #include <memory>
 #include <utility>
 
+#include "JsonIO.h"
+
 using json = nlohmann::json;
 
 // =====================
@@ -235,12 +237,21 @@ private:
     void ResetGame();
 
     void Draw();
+    void DrawMenu();
     void DrawUI();
     void DrawLoadingScreen();
 
     void LoadConfig();
     void LoadLeaderboard();
     void SaveScore();
+    void SaveProgress(int levelOverride = -1);
+    bool LoadGame();
+    void DeleteSave();
+    void ContinueFromSave();
+    int CountLevelFiles() const;
+    LevelData ParseLevelJson(const json& levelJson, int level) const;
+    json GetDefaultLevelJson(int level) const;
+
     void StartLevelLoad(int level);
     LevelData BuildLevelData(int level);
     void ApplyLoadedLevel(const LevelData& data, int level);
@@ -255,7 +266,24 @@ private:
     void EmitParticlesAtBrick(const Rectangle& brickRect, Color color, int count);
     void UpdateParticles(float dt);
 
+    // 空间划分：网格碰撞（课程要求）
+    void RebuildCollisionGrid();
+    void GetBallGridCell(int& gx, int& gy) const;
+    bool ProcessBrickHit(size_t brickIndex);
+    bool CheckBallBrickCollisionsSpatial();
+    bool CheckBallBrickCollisionsNaive();
+    void DrawCollisionGridDebug() const;
+    int CountEstimatedDrawCalls() const;
+
+    void UpdateEditor();
+    void DrawEditorOverlay();
+    void SaveLayoutToJson(const std::string& path);
+    Color ColorFromLayoutCode(int code, const json& colorMap) const;
+    Color ColorFromPatternChar(char ch) const;
+
     static constexpr int MAX_PARTICLES = 1000;
+    static constexpr int SAVE_VERSION = 2;
+    static constexpr const char* SAVE_PATH = "save.json";
 
     int screenWidth_;
     int screenHeight_;
@@ -302,12 +330,35 @@ private:
 
     // UI
     Rectangle btnPlay_;
+    Rectangle btnContinue_;
     Rectangle btnSettings_;
     Rectangle btnQuit_;
+    bool hasPendingSave_{false};
+    std::string jsonStatusMessage_;
+    int pendingLoadLevel_{1};
+
+    // 关卡编辑器（加分项）
+    bool editingMode_{false};
+    float editorBrickWidth_{75.0f};
+    float editorBrickHeight_{20.0f};
+    float editorSpacing_{5.0f};
 
     // 性能：上一帧 UpdatePlaying 总耗时与子段耗时（毫秒），供 UI / TraceLog
     float lastUpdatePlayingMs_{0.0f};
     float lastParticleUpdateMs_{0.0f};
     float lastBrickCollisionMs_{0.0f};
     int activeParticleCount_{0};
+
+    // 空间网格（默认 8×6，与 PPT 一致）
+    int gridCols_{8};
+    int gridRows_{6};
+    float cellWidth_{100.0f};
+    float cellHeight_{100.0f};
+    std::vector<std::vector<std::vector<size_t>>> brickGrid_;
+    bool useSpatialGrid_{true};
+    bool showGridDebug_{false};
+    int lastCollisionChecks_{0};
+    int lastCollisionCandidates_{0};
+    int activeBrickCount_{0};
+    int estimatedDrawCalls_{0};
 };

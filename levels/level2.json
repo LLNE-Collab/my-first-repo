@@ -1,0 +1,25 @@
+{
+    "background": "assets/bg_level2.png",
+    "brick_texture": "assets/brick_level2.png",
+    "hit_sound": "assets/hit2.wav",
+    "bricks": {
+        "rows": 5,
+        "cols": 10,
+        "width": 70,
+        "height": 18,
+        "spacing": 4,
+        "offset_x": 50,
+        "offset_y": 70,
+        "layout": [
+            [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+            [2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+            [1, 1, 1, 1, 0, 0, 1, 1, 1, 1],
+            [2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
+            [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+        ],
+        "color_map": {
+            "1": "red",
+            "2": "yellow"
+        }
+    }
+}
