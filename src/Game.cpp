@@ -12,9 +12,10 @@
 #include <deque>
 #include <cmath>
 #include <chrono>
+#include <random>
 
 // ============================================================
-// ScoreCalculator
+// ScoreCalculator — 按砖块类型与连击计算得分
 // ============================================================
 
 int ScoreCalculator::CalculateBaseScore(BrickType brickType) const noexcept {
@@ -132,7 +133,7 @@ void PowerUp::Update(float dt, float screenHeight) {
     if (position.y > screenHeight) active = false;
 }
 
-void PowerUp::Draw() {
+void PowerUp::Draw() const {
     if (!active) return;
 
     Color color = (type == PowerUpType::PADDLE_EXTEND) ? GREEN :
@@ -160,7 +161,7 @@ void Particle::Update(float dt) {
     life -= dt;
 }
 
-void Particle::Draw() {
+void Particle::Draw() const {
     if (life > 0.0f) {
         float alpha = life / 0.5f;
         if (alpha < 0.0f) alpha = 0.0f;
@@ -287,26 +288,27 @@ Game::Game()
     SetExitKey(0);
 
     maxLevel_ = CountLevelFiles();
-    hasPendingSave_ = SaveFileExists(SAVE_PATH);
+    RefreshCampaignSaveFlag();
 
-    const int btnW = 200;
-    const int btnH = 40;
+    const int btnW = 220;
+    const int btnH = 36;
     const int startX = screenWidth_ / 2 - btnW / 2;
-    int menuY = 200;
+    int menuY = 165;
 
-    btnContinue_ = {0.0f, 0.0f, 0.0f, 0.0f};
-    if (hasPendingSave_) {
-        btnContinue_ = {(float)startX, (float)menuY, (float)btnW, (float)btnH};
-        menuY += 50;
-    }
+    btnContinue_ = {(float)startX, (float)menuY, (float)btnW, (float)btnH};
+    menuY += 44;
 
-    btnPlay_ = {(float)startX, (float)menuY, (float)btnW, (float)btnH};
-    menuY += 50;
+    btnRandomGame_ = {(float)startX, (float)menuY, (float)btnW, (float)btnH};
+    menuY += 44;
+    btnSelectGame_ = {(float)startX, (float)menuY, (float)btnW, (float)btnH};
+    menuY += 44;
     btnSettings_ = {(float)startX, (float)menuY, (float)btnW, (float)btnH};
-    menuY += 50;
+    menuY += 44;
     btnQuit_ = {(float)startX, (float)menuY, (float)btnW, (float)btnH};
 
     LoadLeaderboard();
+    RefreshLevelPreviews();
+    InitBackgroundDemoFromLevel(1 + (rand() % std::max(1, maxLevel_)));
 }
 
 Game::~Game() {
@@ -333,14 +335,23 @@ void Game::Update() {
         case GameState::MENU:
             UpdateMenu();
             break;
+        case GameState::LEVEL_SELECT:
+            UpdateLevelSelect();
+            break;
         case GameState::PLAYING:
             UpdatePlaying();
             break;
         case GameState::PAUSED:
             UpdatePaused();
             break;
+        case GameState::LEVEL_CLEAR:
+            UpdateLevelClear();
+            break;
         case GameState::GAME_OVER:
-            if (IsKeyPressed(KEY_ENTER)) state_ = GameState::MENU;
+            if (IsKeyPressed(KEY_ENTER)) {
+                RefreshCampaignSaveFlag();
+                state_ = GameState::MENU;
+            }
             break;
         case GameState::LEADERBOARD:
             if (IsKeyPressed(KEY_ESCAPE)) state_ = GameState::MENU;
@@ -349,13 +360,16 @@ void Game::Update() {
 }
 
 void Game::UpdateMenu() {
+    UpdateBackgroundDemo(GetFrameTime());
+
     if (hasPendingSave_ && IsButtonClicked(btnContinue_)) {
-        state_ = GameState::PLAYING;
-        ContinueFromSave();
+        ResumeCampaign();
     }
-    if (IsButtonClicked(btnPlay_)) {
-        state_ = GameState::PLAYING;
-        ResetGame();
+    if (IsButtonClicked(btnRandomGame_)) {
+        StartRandomGame();
+    }
+    if (IsButtonClicked(btnSelectGame_)) {
+        EnterLevelSelect();
     }
     if (IsButtonClicked(btnSettings_)) {
         state_ = GameState::LEADERBOARD;
@@ -370,9 +384,11 @@ void Game::UpdatePaused() {
         state_ = GameState::PLAYING;
     }
     if (IsKeyPressed(KEY_Q)) {
-        SaveProgress();
+        if (!isRandomMode_) {
+            SaveProgress();
+        }
+        RefreshCampaignSaveFlag();
         state_ = GameState::MENU;
-        hasPendingSave_ = true;
     }
     if (IsKeyPressed(KEY_E)) {
         editingMode_ = !editingMode_;
@@ -393,6 +409,7 @@ void Game::ClampPaddle(Paddle& paddle) {
         paddle.position.y = screenHeight_ - paddle.height;
 }
 
+// 性能测量：GetTime 墙钟 + 每 60 帧 TraceLog（Total / Physics / Particles）
 void Game::RecordUpdatePlayingLatency(double startSeconds) {
     lastUpdatePlayingMs_ = static_cast<float>((GetTime() - startSeconds) * 1000.0);
     estimatedDrawCalls_ = CountEstimatedDrawCalls();
@@ -412,6 +429,7 @@ void Game::RecordUpdatePlayingLatency(double startSeconds) {
     }
 }
 
+// 空间网格：关卡加载或编辑后重建；碰撞时只查球所在格及 3×3 邻域
 void Game::RebuildCollisionGrid() {
     for (auto& row : brickGrid_) {
         for (auto& cell : row) {
@@ -461,9 +479,7 @@ bool Game::ProcessBrickHit(size_t brickIndex) {
     ball_.velocity.y *= -1.0f;
     score_ += 1;
 
-    if (IsAudioDeviceReady() && hitSound_.frameCount > 0) {
-        PlaySound(hitSound_);
-    }
+    PlayBrickHitSound(brick.color);
 
     EmitParticlesAtBrick(brick.rect, brick.color, 20);
 
@@ -737,7 +753,7 @@ void Game::UpdatePlaying() {
         return;
     }
 
-    if (IsKeyPressed(KEY_F5)) {
+    if (IsKeyPressed(KEY_F5) && !isRandomMode_) {
         SaveProgress();
         jsonStatusMessage_ = "进度已保存";
     }
@@ -865,8 +881,9 @@ void Game::UpdatePlaying() {
     if (ball_.position.y + ball_.radius >= screenHeight_) {
         lives_--;
         if (lives_ <= 0) {
-            DeleteSave();
-            hasPendingSave_ = false;
+            if (!isRandomMode_) {
+                DeleteSave();
+            }
             state_ = GameState::GAME_OVER;
             SaveScore();
         } else {
@@ -883,16 +900,15 @@ void Game::UpdatePlaying() {
         [](const Brick& b) { return !b.active; });
 
     if (allBricksDestroyed) {
-        if (currentLevel_ < maxLevel_) {
+        if (isRandomMode_) {
+            StartLevelClearCelebration(true, 0, false);
+        } else if (currentLevel_ < maxLevel_) {
             const int nextLevel = currentLevel_ + 1;
             SaveProgress(nextLevel);
-            hasPendingSave_ = true;
-            StartLevelLoad(nextLevel);
+            StartLevelClearCelebration(false, nextLevel, false);
         } else {
             DeleteSave();
-            hasPendingSave_ = false;
-            state_ = GameState::GAME_OVER;
-            SaveScore();
+            StartLevelClearCelebration(false, 0, true);
         }
     }
 
@@ -931,56 +947,720 @@ void Game::UpdatePlaying() {
 // Reset
 // ============================================================
 
-void Game::ResetGame() {
-    DeleteSave();
-    hasPendingSave_ = false;
-    editingMode_ = false;
-
+void Game::SetupSessionDefaults() {
     lives_ = config_.value("game", json::object()).value("max_lives", 5);
     score_ = 0;
 
-    float speed = config_["ball"]["speed_base"].get<float>();
-    float radius = config_["ball"]["radius"].get<float>();
+    const float speed = config_.value("ball", json::object()).value("speed_base", 4.0f);
+    const float radius = config_.value("ball", json::object()).value("radius", 10.0f);
+    ball_ = Ball({screenWidth_ / 2.0f, screenHeight_ / 2.0f}, {speed, -speed}, radius, RED);
 
-    ball_ = Ball(
-        { screenWidth_ / 2.0f, screenHeight_ / 2.0f },
-        { speed, -speed },
-        radius,
-        RED
-    );
-
-    float paddleWidth = config_["paddle"]["width"].get<float>();
-    float paddleHeight = config_["paddle"]["height"].get<float>();
+    const float paddleWidth = config_.value("paddle", json::object()).value("width", 100.0f);
+    const float paddleHeight = config_.value("paddle", json::object()).value("height", 10.0f);
 
     paddle1_.width = paddleWidth;
     paddle1_.height = paddleHeight;
     paddle1_.originalWidth = paddleWidth;
-    paddle1_.position = { screenWidth_ * 0.25f - paddleWidth / 2.0f, (float)screenHeight_ - 50 };
+    paddle1_.position = {screenWidth_ * 0.25f - paddleWidth / 2.0f, (float)screenHeight_ - 50};
     paddle1_.color = BLUE;
     paddle1_.extendTimer = 0.0f;
 
     paddle2_.width = paddleWidth;
     paddle2_.height = paddleHeight;
     paddle2_.originalWidth = paddleWidth;
-    paddle2_.position = { screenWidth_ * 0.75f - paddleWidth / 2.0f, (float)screenHeight_ - 50 };
+    paddle2_.position = {screenWidth_ * 0.75f - paddleWidth / 2.0f, (float)screenHeight_ - 50};
     paddle2_.color = GREEN;
     paddle2_.extendTimer = 0.0f;
-
-    bricks_.clear();
 
     powerUps_.clear();
     ClearParticlePool();
     slowBallTimer_ = 0.0f;
     ballRespawnTimer_ = 0.0f;
     originalVelocities_.clear();
-    currentLevel_ = 1;
+    editingMode_ = false;
     isLoading_ = false;
     loadReady_ = false;
     loadFailed_ = false;
     loadingMessage_.clear();
+}
 
-    SaveProgress(1);
-    StartLevelLoad(1);
+void Game::ResetGame() {
+    SetupSessionDefaults();
+    currentLevel_ = 1;
+    bricks_.clear();
+}
+
+void Game::RefreshLevelPreviews() {
+    levelPreviews_.clear();
+    levelPreviews_.reserve(static_cast<size_t>(maxLevel_));
+    for (int i = 1; i <= maxLevel_; ++i) {
+        levelPreviews_.push_back(BuildLevelData(i));
+    }
+}
+
+void Game::ShuffleBackgroundDemoLevels() {
+    bgDemoLevelQueue_.clear();
+    for (int i = 1; i <= maxLevel_; ++i) {
+        bgDemoLevelQueue_.push_back(i);
+    }
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::shuffle(bgDemoLevelQueue_.begin(), bgDemoLevelQueue_.end(), gen);
+    bgDemoQueueIndex_ = 0;
+}
+
+void Game::AdvanceBackgroundDemoLevel() {
+    if (bgDemoLevelQueue_.empty()) {
+        return;
+    }
+    bgDemoQueueIndex_ = (bgDemoQueueIndex_ + 1) % static_cast<int>(bgDemoLevelQueue_.size());
+    InitBackgroundDemoFromLevel(bgDemoLevelQueue_[static_cast<size_t>(bgDemoQueueIndex_)]);
+}
+
+void Game::InitBackgroundDemoFromLevel(int level) {
+    if (levelPreviews_.empty()) {
+        RefreshLevelPreviews();
+    }
+    const int idx = std::clamp(level, 1, maxLevel_) - 1;
+    if (idx >= 0 && idx < static_cast<int>(levelPreviews_.size())) {
+        InitBackgroundDemoFromLevelData(levelPreviews_[static_cast<size_t>(idx)]);
+    }
+}
+
+void Game::InitBackgroundDemoFromLevelData(const LevelData& data) {
+    bgDemoBricks_ = data.bricks;
+    bgDemoBrickSnapshot_ = data.bricks;
+    for (auto& brick : bgDemoBricks_) {
+        brick.active = true;
+    }
+
+    const json ballCfg = config_.value("ball", json::object());
+    const float speed = ballCfg.value("speed_base", 4.0f);
+    const float radius = ballCfg.value("radius", 10.0f);
+    bgDemoBall_ = Ball(
+        {screenWidth_ / 2.0f, screenHeight_ * 0.55f},
+        {speed * 1.15f, -speed * 1.1f},
+        radius,
+        Color{80, 220, 255, 255}
+    );
+
+    const json paddleCfg = config_.value("paddle", json::object());
+    const float paddleWidth = paddleCfg.value("width", 100.0f);
+    const float paddleHeight = paddleCfg.value("height", 10.0f);
+    bgDemoPaddle1_ = Paddle(
+        {screenWidth_ * 0.25f - paddleWidth / 2.0f, static_cast<float>(screenHeight_) - 50.0f},
+        paddleWidth,
+        paddleHeight,
+        Color{70, 140, 255, 230}
+    );
+    bgDemoPaddle2_ = Paddle(
+        {screenWidth_ * 0.75f - paddleWidth / 2.0f, static_cast<float>(screenHeight_) - 50.0f},
+        paddleWidth,
+        paddleHeight,
+        Color{70, 255, 180, 230}
+    );
+    bgDemoPaddle1_.originalWidth = paddleWidth;
+    bgDemoPaddle2_.originalWidth = paddleWidth;
+
+    bgDemoPowerUps_.clear();
+    bgDemoPowerUpSpawnTimer_ = 1.2f;
+    bgDemoSimTime_ = 0.0f;
+}
+
+void Game::ResetBackgroundDemoBricks() {
+    bgDemoBricks_ = bgDemoBrickSnapshot_;
+    for (auto& brick : bgDemoBricks_) {
+        brick.active = true;
+    }
+}
+
+void Game::UpdateBackgroundDemo(float dt) {
+    if (bgDemoBricks_.empty()) {
+        return;
+    }
+
+    bgDemoSimTime_ += dt;
+    bgDemoPaddle1_.Update(dt);
+    bgDemoPaddle2_.Update(dt);
+
+    const float targetX1 = bgDemoBall_.position.x - bgDemoPaddle1_.width * 0.5f;
+    const float targetX2 = bgDemoBall_.position.x - bgDemoPaddle2_.width * 0.5f +
+                           std::sin(bgDemoSimTime_ * 1.7f) * 40.0f;
+    bgDemoPaddle1_.position.x += (targetX1 - bgDemoPaddle1_.position.x) * 4.5f * dt;
+    bgDemoPaddle2_.position.x += (targetX2 - bgDemoPaddle2_.position.x) * 3.2f * dt;
+    ClampPaddle(bgDemoPaddle1_);
+    ClampPaddle(bgDemoPaddle2_);
+
+    bgDemoBall_.Update(dt);
+
+    if (bgDemoBall_.position.x - bgDemoBall_.radius <= 0.0f) {
+        bgDemoBall_.position.x = bgDemoBall_.radius;
+        bgDemoBall_.velocity.x *= -1.0f;
+    } else if (bgDemoBall_.position.x + bgDemoBall_.radius >= screenWidth_) {
+        bgDemoBall_.position.x = static_cast<float>(screenWidth_) - bgDemoBall_.radius;
+        bgDemoBall_.velocity.x *= -1.0f;
+    }
+    if (bgDemoBall_.position.y - bgDemoBall_.radius <= 0.0f) {
+        bgDemoBall_.position.y = bgDemoBall_.radius;
+        bgDemoBall_.velocity.y *= -1.0f;
+    }
+
+    const Rectangle paddleRect1 = {
+        bgDemoPaddle1_.position.x, bgDemoPaddle1_.position.y,
+        bgDemoPaddle1_.width, bgDemoPaddle1_.height
+    };
+    const Rectangle paddleRect2 = {
+        bgDemoPaddle2_.position.x, bgDemoPaddle2_.position.y,
+        bgDemoPaddle2_.width, bgDemoPaddle2_.height
+    };
+
+    if (CheckCollisionCircleRec(bgDemoBall_.position, bgDemoBall_.radius, paddleRect1) &&
+        bgDemoBall_.velocity.y > 0.0f) {
+        bgDemoBall_.velocity.y *= -1.0f;
+        const float hitPos = (bgDemoBall_.position.x - bgDemoPaddle1_.position.x) / bgDemoPaddle1_.width;
+        bgDemoBall_.velocity.x = 8.0f * (hitPos - 0.5f);
+    }
+    if (CheckCollisionCircleRec(bgDemoBall_.position, bgDemoBall_.radius, paddleRect2) &&
+        bgDemoBall_.velocity.y > 0.0f) {
+        bgDemoBall_.velocity.y *= -1.0f;
+        const float hitPos = (bgDemoBall_.position.x - bgDemoPaddle2_.position.x) / bgDemoPaddle2_.width;
+        bgDemoBall_.velocity.x = 8.0f * (hitPos - 0.5f);
+    }
+
+    for (auto& brick : bgDemoBricks_) {
+        if (!brick.active) {
+            continue;
+        }
+        if (CheckCollisionCircleRec(bgDemoBall_.position, bgDemoBall_.radius, brick.rect)) {
+            brick.active = false;
+            bgDemoBall_.velocity.y *= -1.0f;
+        }
+    }
+
+    if (bgDemoBall_.position.y - bgDemoBall_.radius > screenHeight_) {
+        const json ballCfg = config_.value("ball", json::object());
+        const float speed = ballCfg.value("speed_base", 4.0f);
+        const float radius = ballCfg.value("radius", 10.0f);
+        bgDemoBall_ = Ball(
+            {screenWidth_ / 2.0f, screenHeight_ * 0.55f},
+            {speed * (0.8f + static_cast<float>(rand() % 60) / 100.0f), -speed},
+            radius,
+            Color{80, 220, 255, 255}
+        );
+    }
+
+    bool anyBrick = false;
+    for (const auto& brick : bgDemoBricks_) {
+        if (brick.active) {
+            anyBrick = true;
+            break;
+        }
+    }
+    if (!anyBrick) {
+        ResetBackgroundDemoBricks();
+    }
+
+    bgDemoPowerUpSpawnTimer_ -= dt;
+    if (bgDemoPowerUpSpawnTimer_ <= 0.0f) {
+        const float x = 40.0f + static_cast<float>(rand() % std::max(1, screenWidth_ - 80));
+        const auto type = static_cast<PowerUpType>(rand() % 3);
+        bgDemoPowerUps_.emplace_back(Vector2{x, 20.0f}, type);
+        bgDemoPowerUpSpawnTimer_ = 2.0f + static_cast<float>(rand() % 25) / 10.0f;
+    }
+
+    for (auto& powerUp : bgDemoPowerUps_) {
+        powerUp.Update(dt, static_cast<float>(screenHeight_));
+    }
+    bgDemoPowerUps_.erase(
+        std::remove_if(bgDemoPowerUps_.begin(), bgDemoPowerUps_.end(),
+                       [](const PowerUp& p) { return !p.active; }),
+        bgDemoPowerUps_.end()
+    );
+}
+
+namespace {
+
+bool ColorsNear(Color a, Color b, int tolerance = 35) {
+    return std::abs(static_cast<int>(a.r) - static_cast<int>(b.r)) <= tolerance &&
+           std::abs(static_cast<int>(a.g) - static_cast<int>(b.g)) <= tolerance &&
+           std::abs(static_cast<int>(a.b) - static_cast<int>(b.b)) <= tolerance;
+}
+
+}  // namespace
+
+float Game::PitchFromBrickColor(Color brickColor) const {
+    if (ColorsNear(brickColor, RED)) {
+        return 0.78f;
+    }
+    if (ColorsNear(brickColor, ORANGE)) {
+        return 0.88f;
+    }
+    if (ColorsNear(brickColor, YELLOW) || ColorsNear(brickColor, GOLD)) {
+        return 1.0f;
+    }
+    if (ColorsNear(brickColor, GREEN)) {
+        return 1.12f;
+    }
+    if (ColorsNear(brickColor, SKYBLUE)) {
+        return 1.28f;
+    }
+    if (ColorsNear(brickColor, BLUE)) {
+        return 1.42f;
+    }
+    if (ColorsNear(brickColor, PINK) || ColorsNear(brickColor, MAGENTA)) {
+        return 1.58f;
+    }
+    if (ColorsNear(brickColor, PURPLE) || ColorsNear(brickColor, VIOLET)) {
+        return 1.52f;
+    }
+    if (ColorsNear(brickColor, GRAY) || ColorsNear(brickColor, DARKGRAY)) {
+        return 0.92f;
+    }
+
+    const float hueMix =
+        (static_cast<float>(brickColor.r) * 0.6f + static_cast<float>(brickColor.g) * 0.3f +
+         static_cast<float>(brickColor.b) * 0.1f) /
+        255.0f;
+    return 0.75f + hueMix * 0.85f;
+}
+
+void Game::PlayBrickHitSound(Color brickColor) const {
+    if (!IsAudioDeviceReady() || hitSound_.frameCount <= 0) {
+        return;
+    }
+    SetSoundPitch(hitSound_, PitchFromBrickColor(brickColor));
+    PlaySound(hitSound_);
+}
+
+void Game::DrawTechBackground() const {
+    ClearBackground(Color{10, 12, 20, 255});
+
+    const Color gridMajor = {0, 200, 255, 22};
+    const Color gridMinor = {0, 140, 200, 12};
+    for (int x = 0; x <= screenWidth_; x += 20) {
+        DrawLine(x, 0, x, screenHeight_, (x % 40 == 0) ? gridMajor : gridMinor);
+    }
+    for (int y = 0; y <= screenHeight_; y += 20) {
+        DrawLine(0, y, screenWidth_, y, (y % 40 == 0) ? gridMajor : gridMinor);
+    }
+
+    DrawRectangleGradientV(0, 0, screenWidth_, screenHeight_,
+                           Fade(Color{0, 80, 120, 255}, 0.08f),
+                           Fade(BLACK, 0.55f));
+}
+
+void Game::DrawPlayingBackground() const {
+    if (backgroundTexture_.id != 0) {
+        DrawTexturePro(
+            backgroundTexture_,
+            Rectangle{0.0f, 0.0f, static_cast<float>(backgroundTexture_.width),
+                      static_cast<float>(backgroundTexture_.height)},
+            Rectangle{0.0f, 0.0f, static_cast<float>(screenWidth_), static_cast<float>(screenHeight_)},
+            Vector2{0.0f, 0.0f},
+            0.0f,
+            Fade(WHITE, 0.1f)
+        );
+    }
+}
+
+void Game::DrawPlayingEntities() const {
+    for (const auto& brick : bricks_) {
+        if (!brick.active) {
+            continue;
+        }
+
+        if (brickTexture_.id != 0) {
+            DrawTexturePro(
+                brickTexture_,
+                Rectangle{0.0f, 0.0f, static_cast<float>(brickTexture_.width),
+                          static_cast<float>(brickTexture_.height)},
+                brick.rect,
+                Vector2{0.0f, 0.0f},
+                0.0f,
+                brick.color
+            );
+        } else {
+            DrawRectangleRec(brick.rect, brick.color);
+        }
+        DrawRectangleLinesEx(brick.rect, 1, Fade(Color{0, 220, 255, 255}, 0.35f));
+    }
+
+    for (const auto& powerUp : powerUps_) {
+        powerUp.Draw();
+    }
+
+    ball_.Draw();
+    paddle1_.Draw();
+    paddle2_.Draw();
+
+    for (int i = 0; i < MAX_PARTICLES; ++i) {
+        if (particleActive_[i]) {
+            particlePool_[i].Draw();
+        }
+    }
+}
+
+void Game::DrawBackgroundDemo() const {
+    for (const auto& brick : bgDemoBricks_) {
+        if (!brick.active) {
+            continue;
+        }
+        Color c = brick.color;
+        c.a = static_cast<unsigned char>(std::min(255, static_cast<int>(c.a) * 85 / 100));
+        DrawRectangleRec(brick.rect, c);
+        DrawRectangleLinesEx(brick.rect, 1, Fade(Color{0, 220, 255, 255}, 0.25f));
+    }
+
+    for (const auto& powerUp : bgDemoPowerUps_) {
+        powerUp.Draw();
+    }
+
+    bgDemoPaddle1_.Draw();
+    bgDemoPaddle2_.Draw();
+    bgDemoBall_.Draw();
+}
+
+void Game::SpawnFireworkBurst(Vector2 center) {
+    const Color palette[] = {
+        Color{255, 80, 120, 255}, Color{255, 180, 60, 255}, Color{255, 240, 120, 255},
+        Color{80, 220, 255, 255}, Color{120, 255, 160, 255}, Color{200, 120, 255, 255},
+        Color{255, 120, 200, 255}
+    };
+
+    for (int i = 0; i < 48; ++i) {
+        const float angle = static_cast<float>(rand() % 360) * DEG2RAD;
+        const float speed = 90.0f + static_cast<float>(rand() % 160);
+        FireworkSpark spark;
+        spark.pos = center;
+        spark.vel = {std::cos(angle) * speed, std::sin(angle) * speed};
+        spark.color = palette[rand() % 7];
+        spark.maxLife = 0.7f + static_cast<float>(rand() % 30) / 100.0f;
+        spark.life = spark.maxLife;
+        fireworks_.push_back(spark);
+    }
+}
+
+void Game::UpdateFireworks(float dt) {
+    for (auto& spark : fireworks_) {
+        spark.pos.x += spark.vel.x * dt;
+        spark.pos.y += spark.vel.y * dt;
+        spark.vel.y += 220.0f * dt;
+        spark.vel.x *= 0.98f;
+        spark.life -= dt;
+    }
+
+    fireworks_.erase(
+        std::remove_if(fireworks_.begin(), fireworks_.end(),
+                       [](const FireworkSpark& s) { return s.life <= 0.0f; }),
+        fireworks_.end()
+    );
+}
+
+void Game::DrawFireworks() const {
+    for (const auto& spark : fireworks_) {
+        const float t = (spark.maxLife > 0.0f) ? (spark.life / spark.maxLife) : 0.0f;
+        const float alpha = std::clamp(t, 0.0f, 1.0f);
+        const float radius = 2.0f + (1.0f - alpha) * 3.0f;
+        DrawCircleV(spark.pos, radius, Fade(spark.color, alpha));
+    }
+}
+
+void Game::StartLevelClearCelebration(bool randomMode, int nextLevel, bool isFinalVictory) {
+    levelClearRandomMode_ = randomMode;
+    levelClearPendingLevel_ = nextLevel;
+    levelClearIsFinal_ = isFinalVictory;
+    levelClearPhase_ = LevelClearPhase::FIREWORKS;
+    levelClearTimer_ = 0.0f;
+    fireworksBurstTimer_ = 0.0f;
+    fireworks_.clear();
+    state_ = GameState::LEVEL_CLEAR;
+    SpawnFireworkBurst({screenWidth_ / 2.0f, screenHeight_ * 0.32f});
+}
+
+void Game::InitLevelClearDialogButtons() {
+    const int btnW = 200;
+    const int btnH = 44;
+    const int gap = 24;
+    const int totalW = btnW * 2 + gap;
+    const int startX = screenWidth_ / 2 - totalW / 2;
+    const int y = screenHeight_ / 2 + 40;
+
+    if (levelClearIsFinal_) {
+        btnLevelClearNext_ = {0, 0, 0, 0};
+        btnLevelClearQuit_ = {
+            static_cast<float>(screenWidth_ / 2 - btnW / 2),
+            static_cast<float>(y),
+            static_cast<float>(btnW),
+            static_cast<float>(btnH)
+        };
+    } else {
+        btnLevelClearNext_ = {
+            static_cast<float>(startX),
+            static_cast<float>(y),
+            static_cast<float>(btnW),
+            static_cast<float>(btnH)
+        };
+        btnLevelClearQuit_ = {
+            static_cast<float>(startX + btnW + gap),
+            static_cast<float>(y),
+            static_cast<float>(btnW),
+            static_cast<float>(btnH)
+        };
+    }
+}
+
+void Game::UpdateLevelClear() {
+    const float dt = GetFrameTime();
+    levelClearTimer_ += dt;
+    UpdateFireworks(dt);
+
+    fireworksBurstTimer_ += dt;
+    if (levelClearPhase_ == LevelClearPhase::FIREWORKS && fireworksBurstTimer_ >= 0.32f) {
+        fireworksBurstTimer_ = 0.0f;
+        SpawnFireworkBurst({
+            static_cast<float>(80 + rand() % std::max(1, screenWidth_ - 160)),
+            static_cast<float>(60 + rand() % std::max(1, screenHeight_ / 2))
+        });
+    }
+
+    if (levelClearPhase_ == LevelClearPhase::FIREWORKS) {
+        static constexpr float kFireworksDuration = 2.5f;
+        if (levelClearTimer_ >= kFireworksDuration) {
+            if (levelClearRandomMode_) {
+                fireworks_.clear();
+                state_ = GameState::PLAYING;
+                StartRandomLevelLoad();
+            } else {
+                levelClearPhase_ = LevelClearPhase::DIALOG;
+                levelClearTimer_ = 0.0f;
+                InitLevelClearDialogButtons();
+            }
+        }
+        return;
+    }
+
+    if (!levelClearIsFinal_ && btnLevelClearNext_.width > 0.0f && IsButtonClicked(btnLevelClearNext_)) {
+        fireworks_.clear();
+        state_ = GameState::PLAYING;
+        StartLevelLoad(levelClearPendingLevel_);
+        return;
+    }
+
+    if (IsButtonClicked(btnLevelClearQuit_)) {
+        fireworks_.clear();
+        if (levelClearIsFinal_) {
+            SaveScore();
+            state_ = GameState::GAME_OVER;
+        } else {
+            RefreshCampaignSaveFlag();
+            state_ = GameState::MENU;
+            InitBackgroundDemoFromLevel(1 + (rand() % std::max(1, maxLevel_)));
+        }
+    }
+}
+
+void Game::DrawGameplaySnapshot() const {
+    DrawPlayingEntities();
+}
+
+void Game::DrawLevelClearOverlay() const {
+    DrawRectangle(0, 0, screenWidth_, screenHeight_, Fade(BLACK, 0.35f));
+    DrawFireworks();
+
+    if (levelClearPhase_ == LevelClearPhase::FIREWORKS) {
+        const char* msg = levelClearRandomMode_ ? "Level Clear!" : "Stage Complete!";
+        const int tw = MeasureText(msg, 36);
+        DrawText(msg, screenWidth_ / 2 - tw / 2, 80, 36, Color{120, 240, 255, 255});
+        return;
+    }
+
+    const int panelW = 420;
+    const int panelH = levelClearIsFinal_ ? 200 : 220;
+    const int px = screenWidth_ / 2 - panelW / 2;
+    const int py = screenHeight_ / 2 - panelH / 2;
+
+    DrawRectangle(px, py, panelW, panelH, Fade(Color{18, 24, 38, 255}, 0.92f));
+    DrawRectangleLines(px, py, panelW, panelH, Color{0, 200, 255, 200});
+
+    const char* title = levelClearIsFinal_ ? "Campaign Complete!" : "Level Complete!";
+    const int titleW = MeasureText(title, 28);
+    DrawText(title, screenWidth_ / 2 - titleW / 2, py + 24, 28, Color{120, 240, 255, 255});
+
+    if (!levelClearIsFinal_) {
+        const char* sub = TextFormat("Ready for Level %d?", levelClearPendingLevel_);
+        const int subW = MeasureText(sub, 18);
+        DrawText(sub, screenWidth_ / 2 - subW / 2, py + 62, 18, LIGHTGRAY);
+    } else {
+        const char* sub = TextFormat("Final Score: %d", score_);
+        const int subW = MeasureText(sub, 18);
+        DrawText(sub, screenWidth_ / 2 - subW / 2, py + 62, 18, LIGHTGRAY);
+    }
+
+    const Vector2 mouse = GetMousePosition();
+
+    if (!levelClearIsFinal_ && btnLevelClearNext_.width > 0.0f) {
+        const bool hoverNext = CheckCollisionPointRec(mouse, btnLevelClearNext_);
+        DrawRectangleRec(btnLevelClearNext_,
+                         hoverNext ? Color{60, 180, 255, 255} : Color{40, 120, 200, 255});
+        DrawRectangleLinesEx(btnLevelClearNext_, 2, Color{0, 220, 255, 255});
+        const char* nextLabel = "Next Level";
+        const int nw = MeasureText(nextLabel, 20);
+        DrawText(nextLabel,
+                 static_cast<int>(btnLevelClearNext_.x + (btnLevelClearNext_.width - nw) / 2.0f),
+                 static_cast<int>(btnLevelClearNext_.y + 12),
+                 20,
+                 WHITE);
+    }
+
+    const bool hoverQuit = CheckCollisionPointRec(mouse, btnLevelClearQuit_);
+    DrawRectangleRec(btnLevelClearQuit_,
+                     hoverQuit ? Color{255, 100, 100, 255} : Color{180, 70, 70, 255});
+    DrawRectangleLinesEx(btnLevelClearQuit_, 2, Color{255, 160, 160, 255});
+    const char* quitLabel = levelClearIsFinal_ ? "Quit to Results" : "Quit";
+    const int qw = MeasureText(quitLabel, 20);
+    DrawText(quitLabel,
+             static_cast<int>(btnLevelClearQuit_.x + (btnLevelClearQuit_.width - qw) / 2.0f),
+             static_cast<int>(btnLevelClearQuit_.y + 12),
+             20,
+             WHITE);
+}
+
+bool Game::HasCampaignSave() const {
+    if (!SaveFileExists(SAVE_PATH)) {
+        return false;
+    }
+
+    try {
+        std::ifstream file(SAVE_PATH);
+        json save;
+        file >> save;
+        return save.value("campaign", false);
+    } catch (...) {
+        return false;
+    }
+}
+
+void Game::RefreshCampaignSaveFlag() {
+    hasPendingSave_ = HasCampaignSave();
+}
+
+void Game::EnterLevelSelect() {
+    isRandomMode_ = false;
+    RefreshLevelPreviews();
+    ShuffleBackgroundDemoLevels();
+    bgDemoCycleTimer_ = 0.0f;
+    if (!bgDemoLevelQueue_.empty()) {
+        InitBackgroundDemoFromLevel(bgDemoLevelQueue_[0]);
+    }
+    state_ = GameState::LEVEL_SELECT;
+    SetMouseCursor(MOUSE_CURSOR_DEFAULT);
+}
+
+void Game::ResumeCampaign() {
+    if (!HasCampaignSave()) {
+        jsonStatusMessage_ = "请先通过 Select Game 开始战役";
+        return;
+    }
+
+    if (!LoadGame()) {
+        jsonStatusMessage_ = "战役存档损坏";
+        RefreshCampaignSaveFlag();
+        return;
+    }
+
+    isRandomMode_ = false;
+    editingMode_ = false;
+
+    const float speed = config_.value("ball", json::object()).value("speed_base", 4.0f);
+    const float radius = config_.value("ball", json::object()).value("radius", 10.0f);
+    ball_ = Ball({screenWidth_ / 2.0f, screenHeight_ / 2.0f}, {speed, -speed}, radius, RED);
+
+    const float paddleWidth = config_.value("paddle", json::object()).value("width", 100.0f);
+    const float paddleHeight = config_.value("paddle", json::object()).value("height", 10.0f);
+    paddle1_.height = paddleHeight;
+    paddle2_.height = paddleHeight;
+    paddle1_.position = {screenWidth_ * 0.25f - paddleWidth / 2.0f, (float)screenHeight_ - 50};
+    paddle2_.position = {screenWidth_ * 0.75f - paddleWidth / 2.0f, (float)screenHeight_ - 50};
+
+    powerUps_.clear();
+    ClearParticlePool();
+    ballRespawnTimer_ = 0.0f;
+    originalVelocities_.clear();
+
+    bricks_.clear();
+    isLoading_ = false;
+    loadFailed_ = false;
+
+    state_ = GameState::PLAYING;
+    jsonStatusMessage_ = TextFormat("继续战役：第 %d 关", currentLevel_);
+    StartLevelLoad(currentLevel_);
+}
+
+void Game::StartCampaignLevel(int level) {
+    isRandomMode_ = false;
+    editingMode_ = false;
+    SetupSessionDefaults();
+
+    currentLevel_ = level;
+    state_ = GameState::PLAYING;
+    StartLevelLoad(level);
+}
+
+void Game::StartRandomGame() {
+    isRandomMode_ = true;
+    editingMode_ = false;
+    SetupSessionDefaults();
+    currentLevel_ = 0;
+    state_ = GameState::PLAYING;
+    StartRandomLevelLoad();
+}
+
+void Game::UpdateLevelSelect() {
+    const float dt = GetFrameTime();
+    UpdateBackgroundDemo(dt);
+
+    bgDemoCycleTimer_ += dt;
+    if (bgDemoCycleTimer_ >= kBgDemoCycleSeconds) {
+        bgDemoCycleTimer_ = 0.0f;
+        AdvanceBackgroundDemoLevel();
+    }
+
+    if (IsKeyPressed(KEY_ESCAPE)) {
+        state_ = GameState::MENU;
+        InitBackgroundDemoFromLevel(1 + (rand() % std::max(1, maxLevel_)));
+        SetMouseCursor(MOUSE_CURSOR_DEFAULT);
+        return;
+    }
+
+    const int cardW = 120;
+    const int cardH = 88;
+    const int labelH = 32;
+    const int gap = 16;
+    const int totalW = maxLevel_ * cardW + (maxLevel_ - 1) * gap;
+    const float startX = (screenWidth_ - totalW) / 2.0f;
+    const float previewY = 150.0f;
+    const float labelY = previewY + cardH + 8.0f;
+
+    bool anyHover = false;
+
+    for (int i = 0; i < maxLevel_; ++i) {
+        const float x = startX + static_cast<float>(i * (cardW + gap));
+        const Rectangle previewRect = {x, previewY, static_cast<float>(cardW), static_cast<float>(cardH)};
+        const Rectangle labelRect = {x, labelY, static_cast<float>(cardW), static_cast<float>(labelH)};
+        const bool hoverPreview = CheckCollisionPointRec(GetMousePosition(), previewRect);
+        const bool hoverLabel = CheckCollisionPointRec(GetMousePosition(), labelRect);
+        const bool hover = hoverPreview || hoverLabel;
+
+        if (hover) {
+            anyHover = true;
+            if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+                StartCampaignLevel(i + 1);
+                return;
+            }
+        }
+    }
+
+    SetMouseCursor(anyHover ? MOUSE_CURSOR_POINTING_HAND : MOUSE_CURSOR_DEFAULT);
 }
 
 // ============================================================
@@ -1097,9 +1777,9 @@ void Game::DrawUI() {
         DrawRectangle(barX, barY0 + barH + 4, partW, barH, Fade(BLUE, 0.9f));
     }
 
-    DrawText(TextFormat("Score: %d", score_), 10, 158, 20, BLACK);
-    DrawText(TextFormat("Lives: %d", lives_), 10, 188, 20, BLACK);
-    DrawText(TextFormat("Level: %d/%d", currentLevel_, maxLevel_), 10, 218, 20, BLACK);
+    DrawText(TextFormat("Score: %d", score_), 10, 158, 20, Color{120, 240, 255, 255});
+    DrawText(TextFormat("Lives: %d", lives_), 10, 188, 20, Color{255, 200, 120, 255});
+    DrawText(TextFormat("Level: %d/%d", currentLevel_, maxLevel_), 10, 218, 20, LIGHTGRAY);
 
     if (paddle1_.extendTimer > 0.0f) {
         DrawText(TextFormat("P1 Extend: %.1f", paddle1_.extendTimer), 10, 248, 20, BLUE);
@@ -1122,9 +1802,110 @@ void Game::DrawUI() {
     }
 }
 
+void Game::DrawLevelPreview(const LevelData& data, Rectangle bounds, float scale) const {
+    if (data.bricks.empty()) {
+        DrawRectangleRec(bounds, Fade(LIGHTGRAY, 0.5f));
+        return;
+    }
+
+    float minX = data.bricks[0].rect.x;
+    float minY = data.bricks[0].rect.y;
+    float maxX = minX + data.bricks[0].rect.width;
+    float maxY = minY + data.bricks[0].rect.height;
+
+    for (const auto& brick : data.bricks) {
+        minX = std::min(minX, brick.rect.x);
+        minY = std::min(minY, brick.rect.y);
+        maxX = std::max(maxX, brick.rect.x + brick.rect.width);
+        maxY = std::max(maxY, brick.rect.y + brick.rect.height);
+    }
+
+    const float layoutW = std::max(1.0f, maxX - minX);
+    const float layoutH = std::max(1.0f, maxY - minY);
+    const float pad = 6.0f;
+    const float fitScale = std::min((bounds.width - pad * 2.0f) / layoutW,
+                                    (bounds.height - pad * 2.0f) / layoutH) * scale;
+
+    const float drawOffX = bounds.x + (bounds.width - layoutW * fitScale) * 0.5f;
+    const float drawOffY = bounds.y + (bounds.height - layoutH * fitScale) * 0.5f;
+
+    DrawRectangleRec(bounds, Fade(RAYWHITE, 0.92f));
+    DrawRectangleLinesEx(bounds, 2, Fade(DARKGRAY, 0.6f));
+
+    for (const auto& brick : data.bricks) {
+        const Rectangle r = {
+            drawOffX + (brick.rect.x - minX) * fitScale,
+            drawOffY + (brick.rect.y - minY) * fitScale,
+            brick.rect.width * fitScale,
+            brick.rect.height * fitScale
+        };
+        DrawRectangleRec(r, brick.color);
+    }
+}
+
+void Game::DrawLevelSelect() {
+    DrawBackgroundDemo();
+    DrawRectangle(0, 0, screenWidth_, screenHeight_, Fade(BLACK, 0.58f));
+
+    DrawText("SELECT LEVEL", screenWidth_ / 2 - 90, 50, 32, Color{120, 240, 255, 255});
+
+    DrawText("Choose a level to start campaign", screenWidth_ / 2 - 130, 88, 16, LIGHTGRAY);
+
+    const int cardW = 120;
+    const int cardH = 88;
+    const int labelH = 32;
+    const int gap = 16;
+    const int totalW = maxLevel_ * cardW + (maxLevel_ - 1) * gap;
+    const float startX = (screenWidth_ - totalW) / 2.0f;
+    const float previewY = 150.0f;
+    const float labelY = previewY + cardH + 8.0f;
+    const Vector2 mouse = GetMousePosition();
+
+    for (int i = 0; i < maxLevel_; ++i) {
+        const int levelNum = i + 1;
+        const float x = startX + static_cast<float>(i * (cardW + gap));
+        Rectangle previewRect = {x, previewY, static_cast<float>(cardW), static_cast<float>(cardH)};
+        Rectangle labelRect = {x, labelY, static_cast<float>(cardW), static_cast<float>(labelH)};
+
+        const bool hover = CheckCollisionPointRec(mouse, previewRect) ||
+                           CheckCollisionPointRec(mouse, labelRect);
+        const float scale = hover ? 1.08f : 1.0f;
+        const float growW = previewRect.width * (scale - 1.0f);
+        const float growH = (previewRect.height + labelRect.height + 8.0f) * (scale - 1.0f);
+
+        previewRect.x -= growW * 0.5f;
+        previewRect.y -= growH * 0.5f;
+        previewRect.width += growW;
+        previewRect.height += growH;
+        labelRect.x -= growW * 0.5f;
+        labelRect.y -= growH * 0.5f;
+        labelRect.width += growW;
+        labelRect.height += growH * 0.35f;
+
+        const LevelData& preview =
+            (i < static_cast<int>(levelPreviews_.size())) ? levelPreviews_[static_cast<size_t>(i)] : LevelData{};
+        DrawLevelPreview(preview, previewRect, 1.0f);
+
+        const Color labelBg = hover ? Color{60, 160, 255, 240} : Color{30, 40, 55, 220};
+        DrawRectangleRec(labelRect, labelBg);
+        DrawRectangleLinesEx(labelRect, 2, Color{0, 200, 255, 180});
+
+        const char* label = TextFormat("Level %d", levelNum);
+        const int tw = MeasureText(label, 18);
+        DrawText(label,
+                 static_cast<int>(labelRect.x + (labelRect.width - tw) / 2.0f),
+                 static_cast<int>(labelRect.y + 6.0f),
+                 18,
+                 WHITE);
+    }
+
+    DrawText("ESC: Back to Menu", screenWidth_ / 2 - 70, screenHeight_ - 40, 16, GRAY);
+}
+
 void Game::DrawMenu() {
-    DrawRectangle(0, 0, screenWidth_, screenHeight_, Fade(BLACK, 0.3f));
-    DrawText("BREAKOUT", screenWidth_ / 2 - 80, 100, 40, BLACK);
+    DrawBackgroundDemo();
+    DrawRectangle(0, 0, screenWidth_, screenHeight_, Fade(BLACK, 0.62f));
+    DrawText("BREAKOUT", screenWidth_ / 2 - 80, 100, 40, Color{120, 240, 255, 255});
 
     struct MenuBtn {
         Rectangle* rect;
@@ -1134,19 +1915,29 @@ void Game::DrawMenu() {
         Color normalColor;
     };
 
-    MenuBtn items[4];
+    MenuBtn items[5];
     int count = 0;
 
-    if (hasPendingSave_) {
-        items[count++] = {&btnContinue_, "CONTINUE", 50, {100, 200, 255, 255}, {200, 230, 255, 255}};
+    {
+        const bool canContinue = hasPendingSave_;
+        items[count++] = {
+            &btnContinue_,
+            "CONTINUE",
+            50,
+            canContinue ? Color{100, 200, 255, 255} : Color{160, 160, 160, 255},
+            canContinue ? Color{200, 230, 255, 255} : Color{210, 210, 210, 255}
+        };
     }
-    items[count++] = {&btnPlay_, hasPendingSave_ ? "NEW GAME" : "PLAY", 55, {255, 100, 100, 255}, LIGHTGRAY};
+    items[count++] = {&btnRandomGame_, "RANDOM GAME", 35, {255, 140, 80, 255}, {255, 220, 180, 255}};
+    items[count++] = {&btnSelectGame_, "SELECT GAME", 35, {255, 100, 100, 255}, LIGHTGRAY};
     items[count++] = {&btnSettings_, "SETTINGS", 45, {100, 255, 100, 255}, LIGHTGRAY};
     items[count++] = {&btnQuit_, "QUIT", 70, {100, 100, 255, 255}, LIGHTGRAY};
 
     for (int i = 0; i < count; ++i) {
         const MenuBtn& item = items[i];
-        const bool hover = CheckCollisionPointRec(GetMousePosition(), *item.rect);
+        const bool isContinueBtn = item.rect == &btnContinue_;
+        const bool enabled = !isContinueBtn || hasPendingSave_;
+        const bool hover = enabled && CheckCollisionPointRec(GetMousePosition(), *item.rect);
         const float scale = hover ? 1.1f : 1.0f;
         const Color color = hover ? item.hoverColor : item.normalColor;
 
@@ -1162,17 +1953,28 @@ void Game::DrawMenu() {
                  static_cast<int>(scaledRect.x + item.xOffset * scale),
                  static_cast<int>(scaledRect.y + 10.0f * scale),
                  static_cast<int>(20.0f * scale),
-                 BLACK);
+                 WHITE);
     }
 }
 
 void Game::Draw() {
     BeginDrawing();
-    ClearBackground(RAYWHITE);
+
+    if (state_ == GameState::MENU || state_ == GameState::LEVEL_SELECT ||
+        state_ == GameState::PLAYING || state_ == GameState::PAUSED ||
+        state_ == GameState::LEVEL_CLEAR) {
+        DrawTechBackground();
+    } else {
+        ClearBackground(RAYWHITE);
+    }
 
     switch (state_) {
         case GameState::MENU:
             DrawMenu();
+            break;
+
+        case GameState::LEVEL_SELECT:
+            DrawLevelSelect();
             break;
 
         case GameState::PLAYING:
@@ -1186,49 +1988,13 @@ void Game::Draw() {
                 if (isLoading_ || loadFailed_ || showColorLoad) {
                     DrawLoadingScreen();
                 } else {
-                    if (backgroundTexture_.id != 0) {
-                        DrawTexturePro(
-                            backgroundTexture_,
-                            Rectangle{0.0f, 0.0f, (float)backgroundTexture_.width, (float)backgroundTexture_.height},
-                            Rectangle{0.0f, 0.0f, (float)screenWidth_, (float)screenHeight_},
-                            Vector2{0.0f, 0.0f},
-                            0.0f,
-                            WHITE
-                        );
-                    }
-
-                    ball_.Draw();
-                    paddle1_.Draw();
-                    paddle2_.Draw();
+                    DrawPlayingBackground();
 
                     if (showGridDebug_) {
                         DrawCollisionGridDebug();
                     }
 
-                    for (auto& brick : bricks_) {
-                        if (!brick.active) continue;
-
-                        if (brickTexture_.id != 0) {
-                            DrawTexturePro(
-                                brickTexture_,
-                                Rectangle{0.0f, 0.0f, (float)brickTexture_.width, (float)brickTexture_.height},
-                                brick.rect,
-                                Vector2{0.0f, 0.0f},
-                                0.0f,
-                                WHITE
-                            );
-                            DrawRectangleLinesEx(brick.rect, 1, Fade(BLACK, 0.25f));
-                        } else {
-                            brick.Draw();
-                        }
-                    }
-
-                    for (auto& p : powerUps_) p.Draw();
-                    for (int i = 0; i < MAX_PARTICLES; ++i) {
-                        if (particleActive_[i]) {
-                            particlePool_[i].Draw();
-                        }
-                    }
+                    DrawPlayingEntities();
                     DrawUI();
                     DrawEditorOverlay();
 
@@ -1243,42 +2009,8 @@ void Game::Draw() {
             break;
 
         case GameState::PAUSED:
-            if (backgroundTexture_.id != 0) {
-                DrawTexturePro(
-                    backgroundTexture_,
-                    Rectangle{0.0f, 0.0f, (float)backgroundTexture_.width, (float)backgroundTexture_.height},
-                    Rectangle{0.0f, 0.0f, (float)screenWidth_, (float)screenHeight_},
-                    Vector2{0.0f, 0.0f},
-                    0.0f,
-                    WHITE
-                );
-            }
-            ball_.Draw();
-            paddle1_.Draw();
-            paddle2_.Draw();
-            for (auto& brick : bricks_) {
-                if (!brick.active) continue;
-
-                if (brickTexture_.id != 0) {
-                    DrawTexturePro(
-                        brickTexture_,
-                        Rectangle{0.0f, 0.0f, (float)brickTexture_.width, (float)brickTexture_.height},
-                        brick.rect,
-                        Vector2{0.0f, 0.0f},
-                        0.0f,
-                        WHITE
-                    );
-                    DrawRectangleLinesEx(brick.rect, 1, Fade(BLACK, 0.25f));
-                } else {
-                    brick.Draw();
-                }
-            }
-            for (auto& p : powerUps_) p.Draw();
-            for (int i = 0; i < MAX_PARTICLES; ++i) {
-                if (particleActive_[i]) {
-                    particlePool_[i].Draw();
-                }
-            }
+            DrawPlayingBackground();
+            DrawPlayingEntities();
             DrawUI();
             DrawEditorOverlay();
             DrawRectangle(0, 0, screenWidth_, screenHeight_, {0, 0, 0, 150});
@@ -1286,6 +2018,13 @@ void Game::Draw() {
             DrawText("PAUSED", screenWidth_ / 2 - 40, screenHeight_ / 2 - 40, 20, BLACK);
             DrawText("Continue (C) / Quit (Q)", screenWidth_ / 2 - 100, screenHeight_ / 2, 15, BLACK);
             break;
+
+        case GameState::LEVEL_CLEAR: {
+            DrawPlayingBackground();
+            DrawGameplaySnapshot();
+            DrawLevelClearOverlay();
+            break;
+        }
 
         case GameState::GAME_OVER: {
             DrawText("GAME OVER", screenWidth_ / 2 - 80, 200, 40, RED);
@@ -1394,11 +2133,22 @@ json Game::GetDefaultLevelJson(int level) const {
         fallback["brick_texture"] = "assets/brick_level3.png";
         fallback["hit_sound"] = "assets/hit3.wav";
         fallback["pattern"] = json::array({"R...........R", "RG.........GR", "RGB.......BGR"});
+    } else if (level == 4) {
+        fallback["background"] = "assets/bg_level2.png";
+        fallback["brick_texture"] = "assets/brick_level2.png";
+        fallback["hit_sound"] = "assets/hit2.wav";
+        fallback["pattern"] = json::array({"R.R.R.R.R", ".RRRRRRR.", "RRRRRRRRR", ".RRRRRRR.", "R.R.R.R.R"});
+    } else if (level == 5) {
+        fallback["background"] = "assets/bg_level3.png";
+        fallback["brick_texture"] = "assets/brick_level3.png";
+        fallback["hit_sound"] = "assets/hit3.wav";
+        fallback["pattern"] = json::array({"RRRRRRRRRR", "RRRRRRRRRR", "..........", "RRRRRRRRRR", "RRRRRRRRRR", "..........", "RRRRRRRRRR"});
     }
 
     return fallback;
 }
 
+// 数据驱动关卡：优先 pattern 字符串，否则 bricks.layout + color_map
 LevelData Game::ParseLevelJson(const json& levelJson, int level) const {
     LevelData data;
     data.backgroundTexturePath = levelJson.value("background", "assets/bg_level1.png");
@@ -1481,7 +2231,12 @@ int Game::CountLevelFiles() const {
     return count > 0 ? count : 3;
 }
 
+// 序列化游戏状态到 save.json（version 字段用于存档迁移）
 void Game::SaveProgress(int levelOverride) {
+    if (isRandomMode_) {
+        return;
+    }
+
     json save;
     save["version"] = SAVE_VERSION;
     save["current_level"] = levelOverride >= 0 ? levelOverride : currentLevel_;
@@ -1491,6 +2246,7 @@ void Game::SaveProgress(int levelOverride) {
         {"paddle_extend_remaining", std::max(paddle1_.extendTimer, paddle2_.extendTimer)},
         {"slow_ball_remaining", std::max(0.0f, slowBallTimer_)}
     };
+    save["campaign"] = true;
 
     std::ofstream file(SAVE_PATH);
     if (!file.is_open()) {
@@ -1499,9 +2255,10 @@ void Game::SaveProgress(int levelOverride) {
         return;
     }
     file << save.dump(4);
-    hasPendingSave_ = true;
+    RefreshCampaignSaveFlag();
 }
 
+// 反序列化 save.json；v1 自动升级写回 v2
 bool Game::LoadGame() {
     if (!SaveFileExists(SAVE_PATH)) {
         return false;
@@ -1548,6 +2305,11 @@ bool Game::LoadGame() {
             SaveProgress();
         }
 
+        if (!save.value("campaign", false)) {
+            TraceLog(LOG_WARNING, "存档非战役模式，无法 Continue");
+            return false;
+        }
+
         jsonStatusMessage_ = TextFormat("读档成功：关卡 %d", currentLevel_);
         return true;
     } catch (const std::exception& e) {
@@ -1559,39 +2321,60 @@ bool Game::LoadGame() {
 
 void Game::DeleteSave() {
     std::remove(SAVE_PATH);
+    RefreshCampaignSaveFlag();
 }
 
-void Game::ContinueFromSave() {
-    if (!LoadGame()) {
-        ResetGame();
+LevelData Game::BuildRandomLevelData() {
+    LevelData data;
+    data.backgroundTexturePath = "assets/bg_level1.png";
+    data.brickTexturePath = "assets/brick_level1.png";
+    data.hitSoundPath = "assets/hit1.wav";
+
+    const float bWidth = config_.value("bricks", json::object()).value("width", 70.0f);
+    const float bHeight = config_.value("bricks", json::object()).value("height", 18.0f);
+    const float spacing = config_.value("bricks", json::object()).value("spacing", 4.0f);
+    const int cols = 7 + rand() % 4;
+    const int rows = 4 + rand() % 3;
+    const float offsetX = 40.0f + static_cast<float>(rand() % 40);
+    const float offsetY = 50.0f + static_cast<float>(rand() % 30);
+
+    const Color palette[] = {RED, ORANGE, GOLD, GREEN, SKYBLUE, PINK, YELLOW};
+
+    for (int r = 0; r < rows; ++r) {
+        for (int c = 0; c < cols; ++c) {
+            if (rand() % 100 > 62) {
+                continue;
+            }
+            data.bricks.emplace_back(
+                Vector2{offsetX + static_cast<float>(c) * (bWidth + spacing),
+                        offsetY + static_cast<float>(r) * (bHeight + spacing)},
+                bWidth,
+                bHeight,
+                palette[rand() % 7]
+            );
+        }
+    }
+
+    return data;
+}
+
+void Game::StartRandomLevelLoad() {
+    if (isLoading_) {
         return;
     }
 
-    const float speed = config_.value("ball", json::object()).value("speed_base", 4.0f);
-    const float radius = config_.value("ball", json::object()).value("radius", 10.0f);
-    ball_ = Ball({screenWidth_ / 2.0f, screenHeight_ / 2.0f}, {speed, -speed}, radius, RED);
-
-    const float paddleWidth = config_.value("paddle", json::object()).value("width", 100.0f);
-    const float paddleHeight = config_.value("paddle", json::object()).value("height", 10.0f);
-    paddle1_.originalWidth = paddleWidth;
-    paddle2_.originalWidth = paddleWidth;
-    paddle1_.height = paddleHeight;
-    paddle2_.height = paddleHeight;
-    paddle1_.position = {screenWidth_ * 0.25f - paddleWidth / 2.0f, (float)screenHeight_ - 50};
-    paddle2_.position = {screenWidth_ * 0.75f - paddleWidth / 2.0f, (float)screenHeight_ - 50};
-
-    powerUps_.clear();
-    ClearParticlePool();
-    ballRespawnTimer_ = 0.0f;
-    originalVelocities_.clear();
-    editingMode_ = false;
-
-    bricks_.clear();
-    isLoading_ = false;
+    pendingLoadLevel_ = 0;
+    isLoading_ = true;
+    loadReady_ = false;
     loadFailed_ = false;
-    StartLevelLoad(currentLevel_);
+    loadingMessage_ = "Generating";
+
+    loadFuture_ = std::async(std::launch::async, [this]() {
+        return BuildRandomLevelData();
+    });
 }
 
+// 关卡编辑器：E 切换；左键加砖、右键删砖、S 导出 levels/custom.json
 void Game::UpdateEditor() {
     if (IsKeyPressed(KEY_S)) {
         SaveLayoutToJson("levels/custom.json");
@@ -1782,13 +2565,15 @@ void Game::ApplyLoadedLevel(const LevelData& data, int level) {
     brickTexture_ = LoadTexture(data.brickTexturePath.c_str());
     hitSound_ = LoadSound(data.hitSoundPath.c_str());
 
-    currentLevel_ = std::min(level, maxLevel_);
+    if (!isRandomMode_) {
+        currentLevel_ = std::min(level, maxLevel_);
+        SaveProgress();
+    }
     RebuildCollisionGrid();
     loadReady_ = true;
     isLoading_ = false;
     loadFailed_ = false;
     loadingMessage_.clear();
-    SaveProgress();
 }
 
 void Game::DrawLoadingScreen() {
