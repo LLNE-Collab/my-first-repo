@@ -136,7 +136,7 @@ enum class ObstacleSpawnEdge {
 
 /**
  * Random Game 障碍：5×7 点阵大写字母，整体平移。
- * 仅 Random Game 在累计通关达到阈值后出现。
+ * Random Game 中从首局即可出现（见 kRandomObstacleUnlockClears）。
  */
 struct RandomObstacle {
     Vector2 position{};
@@ -394,7 +394,8 @@ private:
     static constexpr int SAVE_VERSION = 2;
     static constexpr const char* SAVE_PATH = "save.json";
     static constexpr int kMaxLevels = 5;
-    static constexpr int kRandomObstacleUnlockClears = 2;
+    /** 0 = 首次进入 Random Game 即出现障碍（无需先通关多局）。 */
+    static constexpr int kRandomObstacleUnlockClears = 0;
     static constexpr int kMaxRandomObstacles = 6;
 
     int screenWidth_;

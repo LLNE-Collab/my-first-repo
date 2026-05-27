@@ -1181,7 +1181,7 @@ void Game::UpdateBackgroundDemo(float dt) {
 }
 
 // ============================================================
-// Random Game — 不规则移动障碍（通关 2 次后解锁）
+// Random Game — 不规则移动障碍（首次进入即可出现）
 // ============================================================
 
 void Game::StorePaddleHomePositions() {
@@ -1956,7 +1956,7 @@ void Game::StartRandomGame() {
     editingMode_ = false;
     randomModeClears_ = 0;
     ClearRandomObstacles();
-    randomObstacleSpawnTimer_ = 4.0f;
+    randomObstacleSpawnTimer_ = 0.8f;
     SetupSessionDefaults();
     currentLevel_ = 0;
     state_ = GameState::PLAYING;
@@ -2139,7 +2139,7 @@ void Game::DrawUI() {
         DrawText(TextFormat("Slow Ball: %.1f", slowBallTimer_), 10, 308, 20, YELLOW);
     }
 
-    if (isRandomMode_ && randomModeClears_ >= kRandomObstacleUnlockClears) {
+    if (isRandomMode_) {
         const int pct = static_cast<int>(RandomObstacleSpawnChance() * 100.0f);
         DrawText(TextFormat("Hazards ON  (%d%%)", pct), screenWidth_ - 170, 10, 16, Color{210, 150, 90, 255});
     }
@@ -2916,7 +2916,7 @@ void Game::ApplyLoadedLevel(const LevelData& data, int level) {
 
     if (isRandomMode_) {
         ClearRandomObstacles();
-        randomObstacleSpawnTimer_ = 2.5f;
+        randomObstacleSpawnTimer_ = 0.8f;
     }
     StorePaddleHomePositions();
 }
