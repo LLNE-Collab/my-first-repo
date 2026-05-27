@@ -126,6 +126,29 @@ public:
     Color color;
 };
 
+/** Random Game 障碍块从哪一侧进入屏幕。 */
+enum class ObstacleSpawnEdge {
+    Top = 0,
+    Bottom,
+    Left,
+    Right
+};
+
+/**
+ * Random Game 障碍：5×7 点阵大写字母，整体平移。
+ * 仅 Random Game 在累计通关达到阈值后出现。
+ */
+struct RandomObstacle {
+    Vector2 position{};
+    std::vector<Vector2> cellOffsets;
+    float cellSize{18.0f};
+    Vector2 velocity{};
+    bool active{false};
+    ObstacleSpawnEdge spawnEdge{ObstacleSpawnEdge::Top};
+    char letter{'A'};
+    Color tint{WHITE};
+};
+
 /** 单块砖：rect 为碰撞与绘制区域，active 表示是否仍在场上。 */
 class Brick {
 public:
@@ -147,7 +170,6 @@ struct LevelData {
     std::vector<Brick> bricks;
     std::string backgroundTexturePath;
     std::string brickTexturePath;
-    std::string hitSoundPath;
 };
 
 /** 下落道具实例。 */
@@ -279,10 +301,19 @@ private:
     void DrawTechBackground() const;
     void DrawPlayingBackground() const;
     void DrawPlayingEntities() const;
+    void DrawRandomObstacles() const;
+    void StorePaddleHomePositions();
+    void ClearRandomObstacles();
+    void UpdateRandomObstacles(float dt);
+    void SpawnRandomObstacle();
+    void HandleRandomObstaclePaddleHits();
+    void HandleRandomObstacleBallHits();
+    [[nodiscard]] float RandomObstacleSpawnChance() const;
+    void BuildLetterObstacleShape(RandomObstacle& obs);
+    [[nodiscard]] Color ObstacleLetterColor(char letter) const;
+    void GetObstacleCellRects(const RandomObstacle& obs, std::vector<Rectangle>& out) const;
     void DrawBackgroundDemo() const;
     void DrawGameplaySnapshot() const;
-    void PlayBrickHitSound(Color brickColor) const;
-    [[nodiscard]] float PitchFromBrickColor(Color brickColor) const;
     void DrawLevelClearOverlay() const;
     void DrawUI();
     void DrawLoadingScreen();
@@ -363,6 +394,8 @@ private:
     static constexpr int SAVE_VERSION = 2;
     static constexpr const char* SAVE_PATH = "save.json";
     static constexpr int kMaxLevels = 5;
+    static constexpr int kRandomObstacleUnlockClears = 2;
+    static constexpr int kMaxRandomObstacles = 6;
 
     int screenWidth_;
     int screenHeight_;
@@ -398,7 +431,6 @@ private:
     Color loadedBrickColor_;
     Texture2D backgroundTexture_{};
     Texture2D brickTexture_{};
-    Sound hitSound_{};
 
     float slowBallTimer_;
     float ballRespawnTimer_;
@@ -468,4 +500,11 @@ private:
         float maxLife{1.0f};
     };
     std::vector<FireworkSpark> fireworks_;
+
+    // Random Game 难度：通关次数越多，障碍生成概率越高
+    std::vector<RandomObstacle> randomObstacles_;
+    int randomModeClears_{0};
+    float randomObstacleSpawnTimer_{4.0f};
+    Vector2 paddle1Home_{};
+    Vector2 paddle2Home_{};
 };

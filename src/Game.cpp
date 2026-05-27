@@ -283,7 +283,6 @@ Game::Game()
     const std::string title =
         config_.value("screen", json::object()).value("title", std::string("Breakout Game"));
     InitWindow(screenWidth_, screenHeight_, title.c_str());
-    InitAudioDevice();
     SetTargetFPS(60);
     SetExitKey(0);
 
@@ -314,8 +313,6 @@ Game::Game()
 Game::~Game() {
     if (backgroundTexture_.id != 0) UnloadTexture(backgroundTexture_);
     if (brickTexture_.id != 0) UnloadTexture(brickTexture_);
-    if (hitSound_.frameCount > 0) UnloadSound(hitSound_);
-    if (IsAudioDeviceReady()) CloseAudioDevice();
     CloseWindow();
 }
 
@@ -478,8 +475,6 @@ bool Game::ProcessBrickHit(size_t brickIndex) {
     --activeBrickCount_;
     ball_.velocity.y *= -1.0f;
     score_ += 1;
-
-    PlayBrickHitSound(brick.color);
 
     EmitParticlesAtBrick(brick.rect, brick.color, 20);
 
@@ -804,6 +799,9 @@ void Game::UpdatePlaying() {
     ClampPaddle(paddle1_);
     ClampPaddle(paddle2_);
 
+    UpdateRandomObstacles(dt);
+    HandleRandomObstaclePaddleHits();
+
     // 球重生计时：倒计时期间允许移动/道具/粒子继续更新，但不更新球物理与碰撞
     if (ballRespawnTimer_ > 0.0f) {
         ballRespawnTimer_ -= dt;
@@ -863,6 +861,8 @@ void Game::UpdatePlaying() {
         (void)CheckBallBrickCollisionsNaive();
     }
     lastBrickCollisionMs_ = static_cast<float>((GetTime() - startCollision) * 1000.0);
+
+    HandleRandomObstacleBallHits();
 
     // 道具接住
     for (auto& powerUp : powerUps_) {
@@ -982,6 +982,8 @@ void Game::SetupSessionDefaults() {
     loadReady_ = false;
     loadFailed_ = false;
     loadingMessage_.clear();
+
+    StorePaddleHomePositions();
 }
 
 void Game::ResetGame() {
@@ -1178,58 +1180,395 @@ void Game::UpdateBackgroundDemo(float dt) {
     );
 }
 
+// ============================================================
+// Random Game — 不规则移动障碍（通关 2 次后解锁）
+// ============================================================
+
+void Game::StorePaddleHomePositions() {
+    paddle1Home_ = paddle1_.position;
+    paddle2Home_ = paddle2_.position;
+}
+
+void Game::ClearRandomObstacles() {
+    randomObstacles_.clear();
+}
+
+float Game::RandomObstacleSpawnChance() const {
+    if (!isRandomMode_ || randomModeClears_ < kRandomObstacleUnlockClears) {
+        return 0.0f;
+    }
+    const int tiers = randomModeClears_ - kRandomObstacleUnlockClears;
+    const float chance = 0.14f + static_cast<float>(tiers) * 0.09f;
+    return std::min(chance, 0.72f);
+}
+
 namespace {
 
-bool ColorsNear(Color a, Color b, int tolerance = 35) {
-    return std::abs(static_cast<int>(a.r) - static_cast<int>(b.r)) <= tolerance &&
-           std::abs(static_cast<int>(a.g) - static_cast<int>(b.g)) <= tolerance &&
-           std::abs(static_cast<int>(a.b) - static_cast<int>(b.b)) <= tolerance;
-}
+constexpr int kLetterRows = 7;
+constexpr int kLetterCols = 5;
+
+const char* const kLetterGlyphs[26][kLetterRows] = {
+    {"01110", "10001", "10001", "11111", "10001", "10001", "00000"}, // A
+    {"11110", "10001", "10001", "11110", "10001", "10001", "11110"}, // B
+    {"01111", "10000", "10000", "10000", "10000", "10000", "01111"}, // C
+    {"11110", "10001", "10001", "10001", "10001", "10001", "11110"}, // D
+    {"11111", "10000", "10000", "11110", "10000", "10000", "11111"}, // E
+    {"11111", "10000", "10000", "11110", "10000", "10000", "10000"}, // F
+    {"01111", "10000", "10000", "10011", "10001", "10001", "01111"}, // G
+    {"10001", "10001", "10001", "11111", "10001", "10001", "10001"}, // H
+    {"01110", "00100", "00100", "00100", "00100", "00100", "01110"}, // I
+    {"00111", "00001", "00001", "00001", "10001", "10001", "01110"}, // J
+    {"10001", "10010", "10100", "11000", "10100", "10010", "10001"}, // K
+    {"10000", "10000", "10000", "10000", "10000", "10000", "11111"}, // L
+    {"10001", "11011", "10101", "10001", "10001", "10001", "10001"}, // M
+    {"10001", "11001", "10101", "10011", "10001", "10001", "10001"}, // N
+    {"01110", "10001", "10001", "10001", "10001", "10001", "01110"}, // O
+    {"11110", "10001", "10001", "11110", "10000", "10000", "10000"}, // P
+    {"01110", "10001", "10001", "10001", "10101", "10010", "01101"}, // Q
+    {"11110", "10001", "10001", "11110", "10100", "10010", "10001"}, // R
+    {"01111", "10000", "10000", "01110", "00001", "00001", "11110"}, // S
+    {"11111", "00100", "00100", "00100", "00100", "00100", "00100"}, // T
+    {"10001", "10001", "10001", "10001", "10001", "10001", "01110"}, // U
+    {"10001", "10001", "10001", "10001", "10001", "01010", "00100"}, // V
+    {"10001", "10001", "10001", "10101", "10101", "10101", "01010"}, // W
+    {"10001", "10001", "01010", "00100", "01010", "10001", "10001"}, // X
+    {"10001", "10001", "01010", "00100", "00100", "00100", "00100"}, // Y
+    {"11111", "00001", "00010", "00100", "01000", "10000", "11111"}, // Z
+};
 
 }  // namespace
 
-float Game::PitchFromBrickColor(Color brickColor) const {
-    if (ColorsNear(brickColor, RED)) {
-        return 0.78f;
-    }
-    if (ColorsNear(brickColor, ORANGE)) {
-        return 0.88f;
-    }
-    if (ColorsNear(brickColor, YELLOW) || ColorsNear(brickColor, GOLD)) {
-        return 1.0f;
-    }
-    if (ColorsNear(brickColor, GREEN)) {
-        return 1.12f;
-    }
-    if (ColorsNear(brickColor, SKYBLUE)) {
-        return 1.28f;
-    }
-    if (ColorsNear(brickColor, BLUE)) {
-        return 1.42f;
-    }
-    if (ColorsNear(brickColor, PINK) || ColorsNear(brickColor, MAGENTA)) {
-        return 1.58f;
-    }
-    if (ColorsNear(brickColor, PURPLE) || ColorsNear(brickColor, VIOLET)) {
-        return 1.52f;
-    }
-    if (ColorsNear(brickColor, GRAY) || ColorsNear(brickColor, DARKGRAY)) {
-        return 0.92f;
-    }
-
-    const float hueMix =
-        (static_cast<float>(brickColor.r) * 0.6f + static_cast<float>(brickColor.g) * 0.3f +
-         static_cast<float>(brickColor.b) * 0.1f) /
-        255.0f;
-    return 0.75f + hueMix * 0.85f;
+Color Game::ObstacleLetterColor(char letter) const {
+    static const Color palette[] = {
+        Color{255, 168, 76, 255},   // 橙
+        Color{255, 128, 200, 255},  // 品红
+        Color{220, 200, 255, 255},  // 淡紫
+        Color{255, 200, 140, 255},  // 杏色
+        Color{255, 150, 120, 255},  // 珊瑚
+        Color{240, 220, 255, 255},  // 薰衣草
+        Color{255, 210, 180, 255},  // 蜜桃
+        Color{255, 185, 100, 255},  // 琥珀
+    };
+    const int idx = (letter >= 'A' && letter <= 'Z') ? (letter - 'A') % 8 : 0;
+    return palette[idx];
 }
 
-void Game::PlayBrickHitSound(Color brickColor) const {
-    if (!IsAudioDeviceReady() || hitSound_.frameCount <= 0) {
+void Game::BuildLetterObstacleShape(RandomObstacle& obs) {
+    obs.letter = static_cast<char>('A' + (rand() % 26));
+    obs.tint = ObstacleLetterColor(obs.letter);
+    obs.cellOffsets.clear();
+    obs.cellSize = 8.5f + static_cast<float>(rand() % 4);
+
+    const int glyphIndex = obs.letter - 'A';
+    for (int row = 0; row < kLetterRows; ++row) {
+        const char* glyphRow = kLetterGlyphs[glyphIndex][row];
+        for (int col = 0; col < kLetterCols; ++col) {
+            if (glyphRow[col] == '1') {
+                obs.cellOffsets.push_back(
+                    {static_cast<float>(col) * obs.cellSize, static_cast<float>(row) * obs.cellSize}
+                );
+            }
+        }
+    }
+}
+
+void Game::GetObstacleCellRects(const RandomObstacle& obs, std::vector<Rectangle>& out) const {
+    out.clear();
+    out.reserve(obs.cellOffsets.size());
+    for (const Vector2& offset : obs.cellOffsets) {
+        out.push_back({obs.position.x + offset.x, obs.position.y + offset.y, obs.cellSize, obs.cellSize});
+    }
+}
+
+void Game::SpawnRandomObstacle() {
+    if (!isRandomMode_ || randomModeClears_ < kRandomObstacleUnlockClears) {
         return;
     }
-    SetSoundPitch(hitSound_, PitchFromBrickColor(brickColor));
-    PlaySound(hitSound_);
+
+    int activeCount = 0;
+    for (const auto& obstacle : randomObstacles_) {
+        if (obstacle.active) {
+            ++activeCount;
+        }
+    }
+    if (activeCount >= kMaxRandomObstacles) {
+        return;
+    }
+
+    RandomObstacle obs;
+    obs.active = true;
+    obs.spawnEdge = static_cast<ObstacleSpawnEdge>(rand() % 4);
+    BuildLetterObstacleShape(obs);
+
+    float minOx = obs.cellOffsets[0].x;
+    float minOy = obs.cellOffsets[0].y;
+    float maxOx = minOx + obs.cellSize;
+    float maxOy = minOy + obs.cellSize;
+    for (const Vector2& offset : obs.cellOffsets) {
+        minOx = std::min(minOx, offset.x);
+        minOy = std::min(minOy, offset.y);
+        maxOx = std::max(maxOx, offset.x + obs.cellSize);
+        maxOy = std::max(maxOy, offset.y + obs.cellSize);
+    }
+
+    const float shapeW = maxOx - minOx;
+    const float shapeH = maxOy - minOy;
+    const float speed = 125.0f + static_cast<float>(randomModeClears_) * 14.0f;
+    const float sw = static_cast<float>(screenWidth_);
+    const float sh = static_cast<float>(screenHeight_);
+    const float margin = 36.0f;
+
+    switch (obs.spawnEdge) {
+        case ObstacleSpawnEdge::Top:
+            obs.position = {
+                margin + static_cast<float>(rand() % std::max(1, static_cast<int>(sw - shapeW - margin * 2.0f))),
+                -maxOy - margin
+            };
+            obs.velocity = {0.0f, speed};
+            break;
+        case ObstacleSpawnEdge::Bottom:
+            obs.position = {
+                margin + static_cast<float>(rand() % std::max(1, static_cast<int>(sw - shapeW - margin * 2.0f))),
+                sh + margin - minOy
+            };
+            obs.velocity = {0.0f, -speed};
+            break;
+        case ObstacleSpawnEdge::Left:
+            obs.position = {
+                -maxOx - margin,
+                margin + static_cast<float>(rand() % std::max(1, static_cast<int>(sh - shapeH - margin * 2.0f)))
+            };
+            obs.velocity = {speed, 0.0f};
+            break;
+        case ObstacleSpawnEdge::Right:
+            obs.position = {
+                sw + margin - minOx,
+                margin + static_cast<float>(rand() % std::max(1, static_cast<int>(sh - shapeH - margin * 2.0f)))
+            };
+            obs.velocity = {-speed, 0.0f};
+            break;
+    }
+
+    bool placed = false;
+    for (auto& slot : randomObstacles_) {
+        if (!slot.active) {
+            slot = obs;
+            placed = true;
+            break;
+        }
+    }
+    if (!placed) {
+        randomObstacles_.push_back(obs);
+    }
+}
+
+void Game::UpdateRandomObstacles(float dt) {
+    if (!isRandomMode_ || randomModeClears_ < kRandomObstacleUnlockClears) {
+        return;
+    }
+
+    randomObstacleSpawnTimer_ -= dt;
+    if (randomObstacleSpawnTimer_ <= 0.0f) {
+        randomObstacleSpawnTimer_ = 1.6f + static_cast<float>(rand() % 18) / 10.0f;
+        const float roll = static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
+        if (roll < RandomObstacleSpawnChance()) {
+            SpawnRandomObstacle();
+        }
+    }
+
+    const float sw = static_cast<float>(screenWidth_);
+    const float sh = static_cast<float>(screenHeight_);
+    const float margin = 48.0f;
+
+    std::vector<Rectangle> cells;
+    for (auto& obstacle : randomObstacles_) {
+        if (!obstacle.active) {
+            continue;
+        }
+
+        obstacle.position.x += obstacle.velocity.x * dt;
+        obstacle.position.y += obstacle.velocity.y * dt;
+
+        GetObstacleCellRects(obstacle, cells);
+        bool offScreen = !cells.empty();
+        switch (obstacle.spawnEdge) {
+            case ObstacleSpawnEdge::Top:
+                for (const auto& cell : cells) {
+                    if (cell.y <= sh + margin) {
+                        offScreen = false;
+                        break;
+                    }
+                }
+                break;
+            case ObstacleSpawnEdge::Bottom:
+                for (const auto& cell : cells) {
+                    if (cell.y + cell.height >= -margin) {
+                        offScreen = false;
+                        break;
+                    }
+                }
+                break;
+            case ObstacleSpawnEdge::Left:
+                for (const auto& cell : cells) {
+                    if (cell.x <= sw + margin) {
+                        offScreen = false;
+                        break;
+                    }
+                }
+                break;
+            case ObstacleSpawnEdge::Right:
+                for (const auto& cell : cells) {
+                    if (cell.x + cell.width >= -margin) {
+                        offScreen = false;
+                        break;
+                    }
+                }
+                break;
+        }
+        if (offScreen) {
+            obstacle.active = false;
+        }
+    }
+}
+
+void Game::HandleRandomObstaclePaddleHits() {
+    if (!isRandomMode_) {
+        return;
+    }
+
+    std::vector<Rectangle> cells;
+
+    auto tryHit = [&](Paddle& paddle, const Vector2& home) -> bool {
+        const Rectangle paddleRect = {paddle.position.x, paddle.position.y, paddle.width, paddle.height};
+        for (auto& obstacle : randomObstacles_) {
+            if (!obstacle.active) {
+                continue;
+            }
+            GetObstacleCellRects(obstacle, cells);
+            for (const Rectangle& cell : cells) {
+                if (!CheckCollisionRecs(paddleRect, cell)) {
+                    continue;
+                }
+
+                obstacle.active = false;
+                paddle.position = home;
+                paddle.width = paddle.originalWidth;
+                paddle.extendTimer = 0.0f;
+
+                lives_--;
+                if (lives_ <= 0) {
+                    state_ = GameState::GAME_OVER;
+                    SaveScore();
+                }
+                return true;
+            }
+        }
+        return false;
+    };
+
+    if (tryHit(paddle1_, paddle1Home_)) {
+        return;
+    }
+    (void)tryHit(paddle2_, paddle2Home_);
+}
+
+void Game::HandleRandomObstacleBallHits() {
+    if (!isRandomMode_) {
+        return;
+    }
+
+    std::vector<Rectangle> cells;
+    for (const auto& obstacle : randomObstacles_) {
+        if (!obstacle.active) {
+            continue;
+        }
+
+        GetObstacleCellRects(obstacle, cells);
+        for (const Rectangle& cell : cells) {
+            if (!CheckCollisionCircleRec(ball_.position, ball_.radius, cell)) {
+                continue;
+            }
+
+            const float ballLeft = ball_.position.x - ball_.radius;
+            const float ballRight = ball_.position.x + ball_.radius;
+            const float ballTop = ball_.position.y - ball_.radius;
+            const float ballBottom = ball_.position.y + ball_.radius;
+
+            const float overlapLeft = ballRight - cell.x;
+            const float overlapRight = (cell.x + cell.width) - ballLeft;
+            const float overlapTop = ballBottom - cell.y;
+            const float overlapBottom = (cell.y + cell.height) - ballTop;
+
+            const float minOverlapX = std::min(overlapLeft, overlapRight);
+            const float minOverlapY = std::min(overlapTop, overlapBottom);
+
+            if (minOverlapX < minOverlapY) {
+                ball_.velocity.x *= -1.0f;
+                if (ball_.position.x < cell.x + cell.width * 0.5f) {
+                    ball_.position.x = cell.x - ball_.radius - 1.0f;
+                } else {
+                    ball_.position.x = cell.x + cell.width + ball_.radius + 1.0f;
+                }
+            } else {
+                ball_.velocity.y *= -1.0f;
+                if (ball_.position.y < cell.y + cell.height * 0.5f) {
+                    ball_.position.y = cell.y - ball_.radius - 1.0f;
+                } else {
+                    ball_.position.y = cell.y + cell.height + ball_.radius + 1.0f;
+                }
+            }
+            return;
+        }
+    }
+}
+
+void Game::DrawRandomObstacles() const {
+    std::vector<Rectangle> cells;
+    char letterText[2] = {'A', '\0'};
+
+    for (const auto& obstacle : randomObstacles_) {
+        if (!obstacle.active) {
+            continue;
+        }
+
+        GetObstacleCellRects(obstacle, cells);
+        if (cells.empty()) {
+            continue;
+        }
+
+        float minX = cells[0].x;
+        float minY = cells[0].y;
+        float maxX = cells[0].x + cells[0].width;
+        float maxY = cells[0].y + cells[0].height;
+        for (const Rectangle& cell : cells) {
+            minX = std::min(minX, cell.x);
+            minY = std::min(minY, cell.y);
+            maxX = std::max(maxX, cell.x + cell.width);
+            maxY = std::max(maxY, cell.y + cell.height);
+        }
+
+        const Color fill = obstacle.tint;
+        const Color edge = Fade(BLACK, 0.55f);
+        for (const Rectangle& cell : cells) {
+            const Rectangle drawRect = {
+                cell.x + 0.5f,
+                cell.y + 0.5f,
+                std::max(4.0f, cell.width - 1.0f),
+                std::max(4.0f, cell.height - 1.0f)
+            };
+            DrawRectangleRec(drawRect, fill);
+            DrawRectangleLinesEx(drawRect, 1, edge);
+        }
+
+        letterText[0] = obstacle.letter;
+        const int fontSize = static_cast<int>(obstacle.cellSize * 6.2f);
+        const int textW = MeasureText(letterText, fontSize);
+        const int textH = fontSize;
+        const int textX = static_cast<int>(minX + (maxX - minX - static_cast<float>(textW)) * 0.5f);
+        const int textY = static_cast<int>(minY + (maxY - minY - static_cast<float>(textH)) * 0.5f);
+        DrawText(letterText, textX + 1, textY + 1, fontSize, Fade(BLACK, 0.65f));
+        DrawText(letterText, textX, textY, fontSize, WHITE);
+    }
 }
 
 void Game::DrawTechBackground() const {
@@ -1288,6 +1627,8 @@ void Game::DrawPlayingEntities() const {
     for (const auto& powerUp : powerUps_) {
         powerUp.Draw();
     }
+
+    DrawRandomObstacles();
 
     ball_.Draw();
     paddle1_.Draw();
@@ -1366,6 +1707,10 @@ void Game::DrawFireworks() const {
 }
 
 void Game::StartLevelClearCelebration(bool randomMode, int nextLevel, bool isFinalVictory) {
+    if (randomMode) {
+        ++randomModeClears_;
+    }
+
     levelClearRandomMode_ = randomMode;
     levelClearPendingLevel_ = nextLevel;
     levelClearIsFinal_ = isFinalVictory;
@@ -1609,6 +1954,9 @@ void Game::StartCampaignLevel(int level) {
 void Game::StartRandomGame() {
     isRandomMode_ = true;
     editingMode_ = false;
+    randomModeClears_ = 0;
+    ClearRandomObstacles();
+    randomObstacleSpawnTimer_ = 4.0f;
     SetupSessionDefaults();
     currentLevel_ = 0;
     state_ = GameState::PLAYING;
@@ -1789,6 +2137,11 @@ void Game::DrawUI() {
     }
     if (slowBallTimer_ > 0.0f) {
         DrawText(TextFormat("Slow Ball: %.1f", slowBallTimer_), 10, 308, 20, YELLOW);
+    }
+
+    if (isRandomMode_ && randomModeClears_ >= kRandomObstacleUnlockClears) {
+        const int pct = static_cast<int>(RandomObstacleSpawnChance() * 100.0f);
+        DrawText(TextFormat("Hazards ON  (%d%%)", pct), screenWidth_ - 170, 10, 16, Color{210, 150, 90, 255});
     }
 
     DrawText(TextFormat("Collision: %s", useSpatialGrid_ ? "Grid" : "Naive"), 10, 338, 16, DARKGREEN);
@@ -2114,7 +2467,6 @@ json Game::GetDefaultLevelJson(int level) const {
     json fallback = {
         {"background", "assets/bg_level1.png"},
         {"brick_texture", "assets/brick_level1.png"},
-        {"hit_sound", "assets/hit1.wav"},
         {"brick_width", 75},
         {"brick_height", 20},
         {"spacing", 5},
@@ -2126,22 +2478,18 @@ json Game::GetDefaultLevelJson(int level) const {
     if (level == 2) {
         fallback["background"] = "assets/bg_level2.png";
         fallback["brick_texture"] = "assets/brick_level2.png";
-        fallback["hit_sound"] = "assets/hit2.wav";
         fallback["pattern"] = json::array({"RRRRRRRRRR", "GGGGGGGGGG", "BBBBBBBBBB"});
     } else if (level == 3) {
         fallback["background"] = "assets/bg_level3.png";
         fallback["brick_texture"] = "assets/brick_level3.png";
-        fallback["hit_sound"] = "assets/hit3.wav";
         fallback["pattern"] = json::array({"R...........R", "RG.........GR", "RGB.......BGR"});
     } else if (level == 4) {
         fallback["background"] = "assets/bg_level2.png";
         fallback["brick_texture"] = "assets/brick_level2.png";
-        fallback["hit_sound"] = "assets/hit2.wav";
         fallback["pattern"] = json::array({"R.R.R.R.R", ".RRRRRRR.", "RRRRRRRRR", ".RRRRRRR.", "R.R.R.R.R"});
     } else if (level == 5) {
         fallback["background"] = "assets/bg_level3.png";
         fallback["brick_texture"] = "assets/brick_level3.png";
-        fallback["hit_sound"] = "assets/hit3.wav";
         fallback["pattern"] = json::array({"RRRRRRRRRR", "RRRRRRRRRR", "..........", "RRRRRRRRRR", "RRRRRRRRRR", "..........", "RRRRRRRRRR"});
     }
 
@@ -2153,7 +2501,6 @@ LevelData Game::ParseLevelJson(const json& levelJson, int level) const {
     LevelData data;
     data.backgroundTexturePath = levelJson.value("background", "assets/bg_level1.png");
     data.brickTexturePath = levelJson.value("brick_texture", "assets/brick_level1.png");
-    data.hitSoundPath = levelJson.value("hit_sound", "assets/hit1.wav");
 
     const json bricksCfg = levelJson.value("bricks", json::object());
     const float bWidth = levelJson.value("brick_width", bricksCfg.value("width", 75.0f));
@@ -2328,7 +2675,6 @@ LevelData Game::BuildRandomLevelData() {
     LevelData data;
     data.backgroundTexturePath = "assets/bg_level1.png";
     data.brickTexturePath = "assets/brick_level1.png";
-    data.hitSoundPath = "assets/hit1.wav";
 
     const float bWidth = config_.value("bricks", json::object()).value("width", 70.0f);
     const float bHeight = config_.value("bricks", json::object()).value("height", 18.0f);
@@ -2493,7 +2839,6 @@ void Game::SaveLayoutToJson(const std::string& path) {
     json out = {
         {"background", "assets/bg_level1.png"},
         {"brick_texture", "assets/brick_level1.png"},
-        {"hit_sound", "assets/hit1.wav"},
         {"brick_width", bW},
         {"brick_height", bH},
         {"spacing", spacing},
@@ -2556,14 +2901,8 @@ void Game::ApplyLoadedLevel(const LevelData& data, int level) {
         UnloadTexture(brickTexture_);
         brickTexture_ = Texture2D{};
     }
-    if (hitSound_.frameCount > 0) {
-        UnloadSound(hitSound_);
-        hitSound_ = Sound{};
-    }
-
     backgroundTexture_ = LoadTexture(data.backgroundTexturePath.c_str());
     brickTexture_ = LoadTexture(data.brickTexturePath.c_str());
-    hitSound_ = LoadSound(data.hitSoundPath.c_str());
 
     if (!isRandomMode_) {
         currentLevel_ = std::min(level, maxLevel_);
@@ -2574,6 +2913,12 @@ void Game::ApplyLoadedLevel(const LevelData& data, int level) {
     isLoading_ = false;
     loadFailed_ = false;
     loadingMessage_.clear();
+
+    if (isRandomMode_) {
+        ClearRandomObstacles();
+        randomObstacleSpawnTimer_ = 2.5f;
+    }
+    StorePaddleHomePositions();
 }
 
 void Game::DrawLoadingScreen() {
