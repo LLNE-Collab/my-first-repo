@@ -23,6 +23,8 @@
 #include <utility>
 
 #include "JsonIO.h"
+#include "LanSession.h"
+#include "NetProtocol.h"
 
 using json = nlohmann::json;
 
@@ -34,7 +36,10 @@ enum class GameState {
     PAUSED,
     LEVEL_CLEAR,
     GAME_OVER,
-    LEADERBOARD
+    LEADERBOARD,
+    LAN_MENU,
+    LAN_HOST_WAIT,
+    LAN_JOIN
 };
 
 /** 战役通关庆祝：烟花转场 → 选关（Random 仅烟花后自动下一局）。 */
@@ -281,6 +286,25 @@ private:
     void StartCampaignLevel(int level);
     void RefreshLevelPreviews();
 
+    void UpdateLanMenu();
+    void UpdateLanHostWait();
+    void UpdateLanJoin();
+    void DrawLanMenu();
+    void DrawLanHostWait();
+    void DrawLanJoin();
+    void StartLanHost();
+    void StartLanJoinScreen();
+    void BeginLanCoopAsHost();
+    void BeginLanCoopAsClient(int level);
+    void StopLanCoop();
+    void LoadLevelSync(int level);
+    void ProcessLanIncoming();
+    void SendLanStateSnapshot();
+    void ApplyLanState(const net::GameSnapshot& snapshot);
+    net::GameSnapshot BuildLanSnapshot() const;
+    void UpdatePlayingAsLanClient();
+    void HandleLanIpTyping();
+
     void InitBackgroundDemoFromLevel(int level);
     void InitBackgroundDemoFromLevelData(const LevelData& data);
     void ResetBackgroundDemoBricks();
@@ -438,11 +462,24 @@ private:
 
     Rectangle btnRandomGame_;
     Rectangle btnSelectGame_;
+    Rectangle btnLanCoop_;
     Rectangle btnContinue_;
     Rectangle btnSettings_;
     Rectangle btnQuit_;
+    Rectangle btnLanHost_{};
+    Rectangle btnLanJoin_{};
+    Rectangle btnLanBack_{};
+    Rectangle btnLanConnect_{};
     bool hasPendingSave_{false};
     bool isRandomMode_{false};
+    bool isLanMode_{false};
+    bool isLanHost_{false};
+    LanSession lanSession_;
+    std::string lanJoinIp_{"127.0.0.1"};
+    std::string lanStatusMessage_;
+    Vector2 lanRemotePaddlePos_{450.0f, 550.0f};
+    float lanStateSendTimer_{0.0f};
+    static constexpr float kLanStateSendInterval = 1.0f / 20.0f;
     std::vector<LevelData> levelPreviews_;
     std::string jsonStatusMessage_;
     int pendingLoadLevel_{1};

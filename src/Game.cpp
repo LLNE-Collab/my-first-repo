@@ -301,9 +301,19 @@ Game::Game()
     menuY += 44;
     btnSelectGame_ = {(float)startX, (float)menuY, (float)btnW, (float)btnH};
     menuY += 44;
+    btnLanCoop_ = {(float)startX, (float)menuY, (float)btnW, (float)btnH};
+    menuY += 44;
     btnSettings_ = {(float)startX, (float)menuY, (float)btnW, (float)btnH};
     menuY += 44;
     btnQuit_ = {(float)startX, (float)menuY, (float)btnW, (float)btnH};
+
+    const int lanBtnW = 180;
+    const int lanBtnH = 40;
+    const int lanX = screenWidth_ / 2 - lanBtnW / 2;
+    btnLanHost_ = {(float)lanX, 220.0f, (float)lanBtnW, (float)lanBtnH};
+    btnLanJoin_ = {(float)lanX, 275.0f, (float)lanBtnW, (float)lanBtnH};
+    btnLanBack_ = {(float)lanX, 380.0f, (float)lanBtnW, (float)lanBtnH};
+    btnLanConnect_ = {(float)lanX, 320.0f, (float)lanBtnW, (float)lanBtnH};
 
     LoadLeaderboard();
     RefreshLevelPreviews();
@@ -311,6 +321,7 @@ Game::Game()
 }
 
 Game::~Game() {
+    StopLanCoop();
     if (backgroundTexture_.id != 0) UnloadTexture(backgroundTexture_);
     if (brickTexture_.id != 0) UnloadTexture(brickTexture_);
     CloseWindow();
@@ -353,6 +364,15 @@ void Game::Update() {
         case GameState::LEADERBOARD:
             if (IsKeyPressed(KEY_ESCAPE)) state_ = GameState::MENU;
             break;
+        case GameState::LAN_MENU:
+            UpdateLanMenu();
+            break;
+        case GameState::LAN_HOST_WAIT:
+            UpdateLanHostWait();
+            break;
+        case GameState::LAN_JOIN:
+            UpdateLanJoin();
+            break;
     }
 }
 
@@ -368,6 +388,10 @@ void Game::UpdateMenu() {
     if (IsButtonClicked(btnSelectGame_)) {
         EnterLevelSelect();
     }
+    if (IsButtonClicked(btnLanCoop_)) {
+        state_ = GameState::LAN_MENU;
+        lanStatusMessage_.clear();
+    }
     if (IsButtonClicked(btnSettings_)) {
         state_ = GameState::LEADERBOARD;
     }
@@ -381,10 +405,14 @@ void Game::UpdatePaused() {
         state_ = GameState::PLAYING;
     }
     if (IsKeyPressed(KEY_Q)) {
-        if (!isRandomMode_) {
-            SaveProgress();
+        if (isLanMode_) {
+            StopLanCoop();
+        } else {
+            if (!isRandomMode_) {
+                SaveProgress();
+            }
+            RefreshCampaignSaveFlag();
         }
-        RefreshCampaignSaveFlag();
         state_ = GameState::MENU;
     }
     if (IsKeyPressed(KEY_E)) {
@@ -676,6 +704,11 @@ void Game::UpdateParticles(float dt) {
 // UpdatePlaying：startFrame 为整帧墙钟；startCollision / startParticle 为分段计时（见下）。
 // 粒子更新放在球/砖碰撞之前，以便球重生等待期内尾迹粒子仍每帧衰减（逻辑需要）。
 void Game::UpdatePlaying() {
+    if (isLanMode_ && !isLanHost_) {
+        UpdatePlayingAsLanClient();
+        return;
+    }
+
     const double startFrame = GetTime();
     lastParticleUpdateMs_ = 0.0f;
     lastBrickCollisionMs_ = 0.0f;
@@ -748,7 +781,7 @@ void Game::UpdatePlaying() {
         return;
     }
 
-    if (IsKeyPressed(KEY_F5) && !isRandomMode_) {
+    if (IsKeyPressed(KEY_F5) && !isRandomMode_ && !isLanMode_) {
         SaveProgress();
         jsonStatusMessage_ = "进度已保存";
     }
@@ -784,23 +817,31 @@ void Game::UpdatePlaying() {
     // 双挡板控制
     float paddleSpeed = 500.0f * dt;
 
-    // paddle1_：WASD
+    ProcessLanIncoming();
+
+    // paddle1_：WASD（LAN 主机控制玩家1）
     if (IsKeyDown(KEY_W)) paddle1_.position.y -= paddleSpeed;
     if (IsKeyDown(KEY_A)) paddle1_.position.x -= paddleSpeed;
     if (IsKeyDown(KEY_S)) paddle1_.position.y += paddleSpeed;
     if (IsKeyDown(KEY_D)) paddle1_.position.x += paddleSpeed;
 
-    // paddle2_：方向键
-    if (IsKeyDown(KEY_UP))    paddle2_.position.y -= paddleSpeed;
-    if (IsKeyDown(KEY_LEFT))  paddle2_.position.x -= paddleSpeed;
-    if (IsKeyDown(KEY_DOWN))  paddle2_.position.y += paddleSpeed;
-    if (IsKeyDown(KEY_RIGHT)) paddle2_.position.x += paddleSpeed;
+    if (isLanMode_ && isLanHost_) {
+        paddle2_.position = lanRemotePaddlePos_;
+    } else {
+        // paddle2_：方向键（本地双人）
+        if (IsKeyDown(KEY_UP)) paddle2_.position.y -= paddleSpeed;
+        if (IsKeyDown(KEY_LEFT)) paddle2_.position.x -= paddleSpeed;
+        if (IsKeyDown(KEY_DOWN)) paddle2_.position.y += paddleSpeed;
+        if (IsKeyDown(KEY_RIGHT)) paddle2_.position.x += paddleSpeed;
+    }
 
     ClampPaddle(paddle1_);
     ClampPaddle(paddle2_);
 
-    UpdateRandomObstacles(dt);
-    HandleRandomObstaclePaddleHits();
+    if (!isLanMode_) {
+        UpdateRandomObstacles(dt);
+        HandleRandomObstaclePaddleHits();
+    }
 
     // 球重生计时：倒计时期间允许移动/道具/粒子继续更新，但不更新球物理与碰撞
     if (ballRespawnTimer_ > 0.0f) {
@@ -862,7 +903,9 @@ void Game::UpdatePlaying() {
     }
     lastBrickCollisionMs_ = static_cast<float>((GetTime() - startCollision) * 1000.0);
 
-    HandleRandomObstacleBallHits();
+    if (!isLanMode_) {
+        HandleRandomObstacleBallHits();
+    }
 
     // 道具接住
     for (auto& powerUp : powerUps_) {
@@ -900,7 +943,23 @@ void Game::UpdatePlaying() {
         [](const Brick& b) { return !b.active; });
 
     if (allBricksDestroyed) {
-        if (isRandomMode_) {
+        if (isLanMode_) {
+            if (currentLevel_ < maxLevel_) {
+                const int nextLevel = currentLevel_ + 1;
+                LoadLevelSync(nextLevel);
+                const float speed = config_.value("ball", json::object()).value("speed_base", 4.0f);
+                const float radius = config_.value("ball", json::object()).value("radius", 10.0f);
+                ball_ = Ball({screenWidth_ / 2.0f, screenHeight_ / 2.0f}, {speed, -speed}, radius, RED);
+                ballRespawnTimer_ = 0.0f;
+                StorePaddleHomePositions();
+                lanSession_.SendJsonLine(net::MakeStart(nextLevel).dump());
+                jsonStatusMessage_ = TextFormat("LAN: 进入第 %d 关", nextLevel);
+            } else {
+                jsonStatusMessage_ = "LAN: 全部通关！";
+                StopLanCoop();
+                state_ = GameState::MENU;
+            }
+        } else if (isRandomMode_) {
             StartLevelClearCelebration(true, 0, false);
         } else if (currentLevel_ < maxLevel_) {
             const int nextLevel = currentLevel_ + 1;
@@ -939,6 +998,20 @@ void Game::UpdatePlaying() {
     }
 
     if (IsKeyPressed(KEY_ESCAPE)) state_ = GameState::PAUSED;
+
+    if (isLanMode_ && isLanHost_) {
+        if (!lanSession_.IsConnected()) {
+            StopLanCoop();
+            state_ = GameState::MENU;
+            jsonStatusMessage_ = "局域网连接已断开";
+        } else {
+            lanStateSendTimer_ -= dt;
+            if (lanStateSendTimer_ <= 0.0f) {
+                lanStateSendTimer_ = kLanStateSendInterval;
+                SendLanStateSnapshot();
+            }
+        }
+    }
 
     RecordUpdatePlayingLatency(startFrame);
 }
@@ -1178,6 +1251,336 @@ void Game::UpdateBackgroundDemo(float dt) {
                        [](const PowerUp& p) { return !p.active; }),
         bgDemoPowerUps_.end()
     );
+}
+
+// ============================================================
+// LAN 局域网合作（TCP + JSON，主机权威）
+// ============================================================
+
+void Game::LoadLevelSync(int level) {
+    pendingLoadLevel_ = level;
+    const LevelData data = BuildLevelData(level);
+    ApplyLoadedLevel(data, level);
+}
+
+void Game::StopLanCoop() {
+    if (lanSession_.IsConnected() || lanSession_.IsListening()) {
+        lanSession_.Close();
+    }
+    isLanMode_ = false;
+    isLanHost_ = false;
+    lanStateSendTimer_ = 0.0f;
+}
+
+void Game::UpdateLanMenu() {
+    UpdateBackgroundDemo(GetFrameTime());
+    if (IsButtonClicked(btnLanHost_)) {
+        StartLanHost();
+    }
+    if (IsButtonClicked(btnLanJoin_)) {
+        StartLanJoinScreen();
+    }
+    if (IsButtonClicked(btnLanBack_) || IsKeyPressed(KEY_ESCAPE)) {
+        state_ = GameState::MENU;
+    }
+}
+
+void Game::StartLanHost() {
+    StopLanCoop();
+    if (!lanSession_.StartHost(net::kDefaultPort)) {
+        lanStatusMessage_ = lanSession_.GetStatusMessage();
+        return;
+    }
+    lanStatusMessage_ = "主机已开房，端口 " + std::to_string(net::kDefaultPort);
+    state_ = GameState::LAN_HOST_WAIT;
+}
+
+void Game::StartLanJoinScreen() {
+    StopLanCoop();
+    lanStatusMessage_.clear();
+    state_ = GameState::LAN_JOIN;
+}
+
+void Game::UpdateLanHostWait() {
+    UpdateBackgroundDemo(GetFrameTime());
+
+    std::string line;
+    while (lanSession_.TryPopJsonLine(line)) {
+        try {
+            const json msg = json::parse(line);
+            if (net::ParseType(msg) == net::MsgType::Hello) {
+                TraceLog(LOG_INFO, "LAN: received hello from client");
+            }
+        } catch (...) {
+        }
+    }
+
+    if (lanSession_.IsConnected()) {
+        BeginLanCoopAsHost();
+        return;
+    }
+
+    if (IsButtonClicked(btnLanBack_) || IsKeyPressed(KEY_ESCAPE)) {
+        StopLanCoop();
+        state_ = GameState::LAN_MENU;
+    }
+}
+
+void Game::HandleLanIpTyping() {
+    if (IsKeyPressed(KEY_BACKSPACE) && !lanJoinIp_.empty()) {
+        lanJoinIp_.pop_back();
+    }
+    for (int key = KEY_ZERO; key <= KEY_NINE; ++key) {
+        if (IsKeyPressed(key)) {
+            lanJoinIp_.push_back(static_cast<char>('0' + (key - KEY_ZERO)));
+        }
+    }
+    if (IsKeyPressed(KEY_PERIOD)) {
+        lanJoinIp_.push_back('.');
+    }
+}
+
+void Game::UpdateLanJoin() {
+    UpdateBackgroundDemo(GetFrameTime());
+    HandleLanIpTyping();
+
+    std::string line;
+    while (lanSession_.TryPopJsonLine(line)) {
+        try {
+            const json msg = json::parse(line);
+            const net::MsgType type = net::ParseType(msg);
+            if (type == net::MsgType::Start) {
+                BeginLanCoopAsClient(msg.value("level", 1));
+                return;
+            }
+            if (type == net::MsgType::State) {
+                net::GameSnapshot snap;
+                if (net::DeserializeState(msg, snap)) {
+                    ApplyLanState(snap);
+                }
+            }
+            if (type == net::MsgType::Bye) {
+                lanStatusMessage_ = "主机已退出";
+                StopLanCoop();
+                state_ = GameState::LAN_MENU;
+                return;
+            }
+        } catch (...) {
+        }
+    }
+
+    if (IsButtonClicked(btnLanConnect_)) {
+        if (lanSession_.Connect(lanJoinIp_, net::kDefaultPort)) {
+            lanSession_.SendJsonLine(net::MakeHello("client").dump());
+            lanStatusMessage_ = "已连接，等待主机开始...";
+        } else {
+            lanStatusMessage_ = lanSession_.GetStatusMessage();
+        }
+    }
+
+    if (IsButtonClicked(btnLanBack_) || IsKeyPressed(KEY_ESCAPE)) {
+        StopLanCoop();
+        state_ = GameState::LAN_MENU;
+    }
+}
+
+void Game::BeginLanCoopAsHost() {
+    isLanMode_ = true;
+    isLanHost_ = true;
+    isRandomMode_ = false;
+    editingMode_ = false;
+    currentLevel_ = 1;
+    SetupSessionDefaults();
+    LoadLevelSync(1);
+    StorePaddleHomePositions();
+    lanRemotePaddlePos_ = paddle2_.position;
+    lanStateSendTimer_ = 0.0f;
+    lanSession_.SendJsonLine(net::MakeHello("host").dump());
+    lanSession_.SendJsonLine(net::MakeStart(1).dump());
+    SendLanStateSnapshot();
+    state_ = GameState::PLAYING;
+    jsonStatusMessage_ = "LAN 主机：WASD 控制左挡板";
+}
+
+void Game::BeginLanCoopAsClient(int level) {
+    isLanMode_ = true;
+    isLanHost_ = false;
+    isRandomMode_ = false;
+    editingMode_ = false;
+    currentLevel_ = level;
+    SetupSessionDefaults();
+    LoadLevelSync(level);
+    StorePaddleHomePositions();
+    state_ = GameState::PLAYING;
+    jsonStatusMessage_ = "LAN 客机：方向键控制右挡板";
+}
+
+net::GameSnapshot Game::BuildLanSnapshot() const {
+    net::GameSnapshot snap;
+    snap.ballPos = ball_.position;
+    snap.ballVel = ball_.velocity;
+    snap.ballRadius = ball_.radius;
+    snap.paddle1 = paddle1_.position;
+    snap.paddle2 = paddle2_.position;
+    snap.paddleW = paddle1_.width;
+    snap.paddleH = paddle1_.height;
+    snap.score = score_;
+    snap.lives = lives_;
+    snap.currentLevel = currentLevel_;
+    snap.ballRespawnTimer = ballRespawnTimer_;
+    snap.brickActive.reserve(bricks_.size());
+    for (const auto& b : bricks_) {
+        snap.brickActive.push_back(b.active ? 1 : 0);
+    }
+    return snap;
+}
+
+void Game::SendLanStateSnapshot() {
+    if (!isLanHost_ || !lanSession_.IsConnected()) {
+        return;
+    }
+    lanSession_.SendJsonLine(net::SerializeState(BuildLanSnapshot()).dump());
+}
+
+void Game::ApplyLanState(const net::GameSnapshot& snapshot) {
+    if (snapshot.currentLevel != currentLevel_) {
+        LoadLevelSync(snapshot.currentLevel);
+    }
+    ball_.position = snapshot.ballPos;
+    ball_.velocity = snapshot.ballVel;
+    ball_.radius = snapshot.ballRadius;
+    paddle1_.position = snapshot.paddle1;
+    paddle2_.position = snapshot.paddle2;
+    paddle1_.width = snapshot.paddleW;
+    paddle2_.width = snapshot.paddleW;
+    paddle1_.height = snapshot.paddleH;
+    paddle2_.height = snapshot.paddleH;
+    score_ = snapshot.score;
+    lives_ = snapshot.lives;
+    ballRespawnTimer_ = snapshot.ballRespawnTimer;
+    for (size_t i = 0; i < bricks_.size() && i < snapshot.brickActive.size(); ++i) {
+        bricks_[i].active = snapshot.brickActive[i] != 0;
+    }
+    RebuildCollisionGrid();
+}
+
+void Game::ProcessLanIncoming() {
+    std::string line;
+    while (lanSession_.TryPopJsonLine(line)) {
+        try {
+            const json msg = json::parse(line);
+            const net::MsgType type = net::ParseType(msg);
+            if (type == net::MsgType::Input && isLanHost_) {
+                lanRemotePaddlePos_.x = msg.value("x", lanRemotePaddlePos_.x);
+                lanRemotePaddlePos_.y = msg.value("y", lanRemotePaddlePos_.y);
+            } else if (type == net::MsgType::State && !isLanHost_) {
+                net::GameSnapshot snap;
+                if (net::DeserializeState(msg, snap)) {
+                    ApplyLanState(snap);
+                }
+            } else if (type == net::MsgType::Start && !isLanHost_) {
+                BeginLanCoopAsClient(msg.value("level", 1));
+            } else if (type == net::MsgType::Bye) {
+                jsonStatusMessage_ = "对方已退出";
+                StopLanCoop();
+                state_ = GameState::MENU;
+            }
+        } catch (...) {
+        }
+    }
+}
+
+void Game::UpdatePlayingAsLanClient() {
+    const double startFrame = GetTime();
+    const float dt = GetFrameTime();
+
+    ProcessLanIncoming();
+    if (!lanSession_.IsConnected()) {
+        StopLanCoop();
+        state_ = GameState::MENU;
+        jsonStatusMessage_ = "局域网连接已断开";
+        return;
+    }
+
+    paddle1_.Update(dt);
+    paddle2_.Update(dt);
+
+    const float paddleSpeed = 500.0f * dt;
+    if (IsKeyDown(KEY_UP)) paddle2_.position.y -= paddleSpeed;
+    if (IsKeyDown(KEY_LEFT)) paddle2_.position.x -= paddleSpeed;
+    if (IsKeyDown(KEY_DOWN)) paddle2_.position.y += paddleSpeed;
+    if (IsKeyDown(KEY_RIGHT)) paddle2_.position.x += paddleSpeed;
+    ClampPaddle(paddle2_);
+
+    lanSession_.SendJsonLine(net::MakeInput(paddle2_.position.x, paddle2_.position.y).dump());
+
+    UpdateParticles(dt);
+
+    if (IsKeyPressed(KEY_ESCAPE)) {
+        state_ = GameState::PAUSED;
+    }
+
+    RecordUpdatePlayingLatency(startFrame);
+}
+
+void Game::DrawLanMenu() {
+    DrawBackgroundDemo();
+    DrawRectangle(0, 0, screenWidth_, screenHeight_, Fade(BLACK, 0.65f));
+    DrawText("LAN CO-OP", screenWidth_ / 2 - 90, 120, 36, Color{120, 240, 255, 255});
+    DrawText("局域网双人合作（TCP）", screenWidth_ / 2 - 130, 165, 18, LIGHTGRAY);
+
+    const auto drawBtn = [&](const Rectangle& r, const char* label, Color c) {
+        const bool hover = CheckCollisionPointRec(GetMousePosition(), r);
+        DrawRectangleRec(r, hover ? Fade(c, 0.85f) : c);
+        const int tw = MeasureText(label, 20);
+        DrawText(label, static_cast<int>(r.x + r.width / 2 - tw / 2),
+                 static_cast<int>(r.y + r.height / 2 - 10), 20, WHITE);
+    };
+    drawBtn(btnLanHost_, "HOST (开房)", Color{60, 120, 200, 255});
+    drawBtn(btnLanJoin_, "JOIN (加入)", Color{60, 160, 120, 255});
+    drawBtn(btnLanBack_, "BACK", Color{100, 100, 120, 255});
+
+    if (!lanStatusMessage_.empty()) {
+        DrawText(lanStatusMessage_.c_str(), 40, screenHeight_ - 60, 16, YELLOW);
+    }
+}
+
+void Game::DrawLanHostWait() {
+    DrawBackgroundDemo();
+    DrawRectangle(0, 0, screenWidth_, screenHeight_, Fade(BLACK, 0.65f));
+    DrawText("LAN HOST", screenWidth_ / 2 - 70, 120, 32, Color{120, 240, 255, 255});
+
+    const std::string ipHint = "本机 IP: " + LanSession::GetLocalIpHint();
+    DrawText("等待队友加入...", screenWidth_ / 2 - 90, 220, 22, GOLD);
+    DrawText(ipHint.c_str(), 40, 280, 18, WHITE);
+    DrawText(TextFormat("端口: %d", net::kDefaultPort), 40, 305, 18, WHITE);
+    DrawText("队友: 主菜单 -> LAN CO-OP -> JOIN", 40, 335, 16, GRAY);
+
+    const bool hover = CheckCollisionPointRec(GetMousePosition(), btnLanBack_);
+    DrawRectangleRec(btnLanBack_, hover ? Color{120, 120, 140, 255} : Color{100, 100, 120, 255});
+    DrawText("CANCEL", static_cast<int>(btnLanBack_.x + 55), static_cast<int>(btnLanBack_.y + 10), 20, WHITE);
+
+    if (!lanStatusMessage_.empty()) {
+        DrawText(lanStatusMessage_.c_str(), 40, screenHeight_ - 60, 16, YELLOW);
+    }
+}
+
+void Game::DrawLanJoin() {
+    DrawBackgroundDemo();
+    DrawRectangle(0, 0, screenWidth_, screenHeight_, Fade(BLACK, 0.65f));
+    DrawText("LAN JOIN", screenWidth_ / 2 - 65, 120, 32, Color{120, 240, 255, 255});
+    DrawText("输入主机 IP:", 40, 300, 20, WHITE);
+    DrawRectangle(38, 328, 360, 36, Fade(BLACK, 0.5f));
+    DrawText(lanJoinIp_.c_str(), 48, 336, 22, Color{120, 240, 255, 255});
+    DrawText("数字键输入 / Backspace 删除", 40, 370, 14, GRAY);
+
+    const bool hover = CheckCollisionPointRec(GetMousePosition(), btnLanConnect_);
+    DrawRectangleRec(btnLanConnect_, hover ? Color{80, 180, 120, 255} : Color{60, 140, 100, 255});
+    DrawText("CONNECT", static_cast<int>(btnLanConnect_.x + 45), static_cast<int>(btnLanConnect_.y + 10), 20, WHITE);
+
+    if (!lanStatusMessage_.empty()) {
+        DrawText(lanStatusMessage_.c_str(), 40, 450, 16, YELLOW);
+    }
 }
 
 // ============================================================
@@ -2143,6 +2546,10 @@ void Game::DrawUI() {
         const int pct = static_cast<int>(RandomObstacleSpawnChance() * 100.0f);
         DrawText(TextFormat("Hazards ON  (%d%%)", pct), screenWidth_ - 170, 10, 16, Color{210, 150, 90, 255});
     }
+    if (isLanMode_) {
+        DrawText(isLanHost_ ? "LAN HOST (WASD)" : "LAN CLIENT (Arrows)",
+                 screenWidth_ - 200, 10, 16, Color{120, 220, 255, 255});
+    }
 
     DrawText(TextFormat("Collision: %s", useSpatialGrid_ ? "Grid" : "Naive"), 10, 338, 16, DARKGREEN);
     DrawText(TextFormat("Checks: %d (cand %d / %d bricks)", lastCollisionChecks_,
@@ -2268,7 +2675,7 @@ void Game::DrawMenu() {
         Color normalColor;
     };
 
-    MenuBtn items[5];
+    MenuBtn items[6];
     int count = 0;
 
     {
@@ -2283,6 +2690,7 @@ void Game::DrawMenu() {
     }
     items[count++] = {&btnRandomGame_, "RANDOM GAME", 35, {255, 140, 80, 255}, {255, 220, 180, 255}};
     items[count++] = {&btnSelectGame_, "SELECT GAME", 35, {255, 100, 100, 255}, LIGHTGRAY};
+    items[count++] = {&btnLanCoop_, "LAN CO-OP", 45, {100, 200, 255, 255}, Color{180, 220, 255, 255}};
     items[count++] = {&btnSettings_, "SETTINGS", 45, {100, 255, 100, 255}, LIGHTGRAY};
     items[count++] = {&btnQuit_, "QUIT", 70, {100, 100, 255, 255}, LIGHTGRAY};
 
@@ -2315,7 +2723,8 @@ void Game::Draw() {
 
     if (state_ == GameState::MENU || state_ == GameState::LEVEL_SELECT ||
         state_ == GameState::PLAYING || state_ == GameState::PAUSED ||
-        state_ == GameState::LEVEL_CLEAR) {
+        state_ == GameState::LEVEL_CLEAR || state_ == GameState::LAN_MENU ||
+        state_ == GameState::LAN_HOST_WAIT || state_ == GameState::LAN_JOIN) {
         DrawTechBackground();
     } else {
         ClearBackground(RAYWHITE);
@@ -2414,6 +2823,18 @@ void Game::Draw() {
             DrawText("Press ESC to return", screenWidth_ / 2 - 80, 400, 20, GRAY);
             break;
         }
+
+        case GameState::LAN_MENU:
+            DrawLanMenu();
+            break;
+
+        case GameState::LAN_HOST_WAIT:
+            DrawLanHostWait();
+            break;
+
+        case GameState::LAN_JOIN:
+            DrawLanJoin();
+            break;
     }
 
     EndDrawing();

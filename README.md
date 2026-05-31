@@ -211,6 +211,18 @@ ctest --output-on-failure
 - [x] `GetTime` / `GetFrameTime` / `TraceLog` 性能测量与 HUD
 - [x] 运行时关卡编辑并导出 JSON
 - [x] 排行榜（`leaderboard.txt`）
+- [x] **LAN CO-OP** 局域网双人合作（TCP + JSON，主机权威同步）
+
+详见 `docs/LAN_MULTIPLAYER.md`。
+
+---
+
+## 局域网联机（LAN CO-OP）
+
+1. 主菜单 → **LAN CO-OP** → **HOST（开房）** 或 **JOIN（加入）**
+2. 主机记下屏幕上的 IP，客机输入该 IP 后点 **CONNECT**
+3. 主机 **WASD**，客机 **方向键**，合作打砖
+4. 默认端口 `5555`；同一台机器测试可用 `127.0.0.1`
 
 ---
 
